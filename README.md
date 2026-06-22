@@ -6,155 +6,171 @@ An LLM-driven platform engine that **recursively decomposes** a high-level softw
 
 ## How It Works
 
+The engine runs one `while True` loop over **depth layers** of the skill tree. Each iteration
+processes all non-atomic nodes at the current depth. Two checkpoints inside each iteration
+(HITL-1 and HITL-2) can both `continue` back to the top of the loop — same layer, same depth
+— causing that layer to be retried from the Decomposer. The outer loop exits only when every
+node in the tree is ATOMIC and no deeper layer has any nodes left.
+
 ```
 [Product Requirement]
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 1. Decomposer Agent  (claude-haiku)                                  │◄─────────────────────────────────┐
-│    • Classifies each node as COMPOSITE or ATOMIC                     │                                  │
-│    • For COMPOSITE → drafts 2–5 immediate sub-skills                 │                                  │
-│    • Assigns composition_type:                                        │                                  │
-│        SEQUENTIAL   — children run in order, state passed along      │                                  │
-│        PARALLEL     — children run concurrently (no data dependency) │                                  │
-│        LOOP         — single child repeated until escalation signal  │                                  │
-│        LLM_COORDINATOR — LlmAgent routes to children by context      │                                  │
-│    • For ATOMIC → assigns exec_type (no further split):              │                                  │
-│        DETERMINISTIC_CODE — pure stdlib logic                        │                                  │
-│        EXTERNAL_API       — single external service call             │                                  │
-│        LLM_PROMPT         — single-turn LLM call                    │                                  │
-└──────────────────────────────────────────────────────────────────────┘                                  │
-        │                                                                                                  │   Recursion:
-        ▼                                                                                                  │   snapshot → decompose
-┌──────────────────────────────────────────────────────────────────────┐                                  │   → review → HITL-1
-│ 1b. Complexity Reviewer  (claude-haiku)                              │                                  │   loop until all nodes
-│    • Scans all nodes at the current layer                            │                                  │   at this depth are
-│    • Flags structural anomalies with advisory notes:                 │                                  │   ATOMIC
-│        OVER-SPLIT — node could be one atomic skill                   │                                  │
-│        TOO-MANY-CHILDREN — composite has > 5 children                │                                  │
-│        SHALLOW-LAYER — entire layer is atomics (nothing to do)       │                                  │
-│        REDUNDANT — duplicates sibling or ancestor scope              │                                  │
-│    • Notes are surfaced as warnings in the HITL dashboard            │                                  │
-└──────────────────────────────────────────────────────────────────────┘                                  │
-        │                                                                                                  │
-        ▼                                                                                                  │
-┌──────────────────────────────────────────────────────────────────────┐                                  │
-│ 2. HITL-1 Dashboard  (FastAPI)           [Approval Checkpoint]       │                                  │
-│    • Human reviews the current decomposition layer                   │                                  │
-│    • Three actions per review:                                        │                                  │
-│                                                                        │                                  │
-│      ① APPROVE LAYER → advance to schema hydration                   │                                  │
-│                                                                        │                                  │
-│      ② ROLLBACK LAYER → restore pre-decompose snapshot;              │──────────────────────────────────┘
-│                          all LLM-generated children purged atomically │
-│                          (no cascading purge needed)                  │
-│                                                                        │
-│      ③ RE-DECOMPOSE NODE → human edits a single node's description   │──┐
-│                             (or types a hint), pipeline re-decomposes │  │ Per-node retry:
-│                             only that subtree; siblings untouched     │  │ reset node, re-call
-│                             (no full-layer rollback required)         │◄─┘ Decomposer with hint
-└──────────────────────────────────────────────────────────────────────┘
-        │ (all nodes at current depth approved)
-        ▼ (repeat from step 1 for the next depth layer)
-        │
-        │ (all depths fully decomposed — every leaf is ATOMIC)
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 3. Schema Architect  (claude-haiku, batches of 5)                    │
-│    • Walks the entire tree for unhydrated ATOMIC nodes               │
-│      (not just the current layer — catches deeply-buried atomics     │
-│       from any prior layer)                                          │
-│    • Defines JSON Schema (input_schema + output_schema) per node     │
-│    • Schemas drive function signatures and LLM instructions          │
-└──────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 3b. Prompt Engineer  (claude-haiku)                                  │
-│    • Runs on every LLM_PROMPT atomic that has no instruction yet     │
-│    • Generates a full system prompt (instruction) per node:          │
-│        – States the node's objective precisely                       │
-│        – Lists which ADK session-state keys to READ at turn start    │
-│        – Lists which ADK session-state keys to WRITE before return   │
-│    • Populates state_reads / state_writes lists on each node         │
-│    • Used later by adk_llm_agent_stub.py.j2 to wire state correctly  │
-└──────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 3c. Tool Implementor  (claude-sonnet-4-6, one node per call)         │
-│    • Runs on every DETERMINISTIC_CODE and EXTERNAL_API atomic        │
-│      that has no implementation yet                                  │
-│    • Generates the Python function body (lines inside the def):      │
-│        DETERMINISTIC_CODE — full logic, stdlib only                  │
-│        EXTERNAL_API       — httpx call with # CONFIGURE: placeholders│
-│    • Returns only the indented function body (no def line)           │
-│    • Post-processes output:                                          │
-│        – _normalise_indent: anchors on first non-empty line's        │
-│          indent level, re-maps to 4-space base                       │
-│        – _check_syntax: wraps in dummy def, runs ast.parse()         │
-│        – _retry_until_valid: re-prompts with error up to 2×          │
-│          if syntax check fails                                        │
-└──────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 4. HITL-2 Dashboard  (FastAPI)           [Approval Checkpoint]       │
-│    • Human reviews generated schemas and function bodies             │
-│    • APPROVE → proceed to compilation                                │
-│    • ROLLBACK → discard entire layer and retry from decompose        │
-└──────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 5. Compiler  (Jinja2 templates, no LLM)                              │
-│    • Normalises all node names to snake_case Python identifiers      │
-│    • Depth-first recursive walk of the tree (leaves first):          │
-│                                                                        │
-│      ATOMIC → LLM_PROMPT:                                            │
-│        renders adk_llm_agent_stub.py.j2                              │
-│        → atomics/{name}.py  (LlmAgent with instruction from node)   │
-│                                                                        │
-│      ATOMIC → DETERMINISTIC_CODE / EXTERNAL_API:                    │
-│        renders adk_tool_stub.py.j2                                   │
-│        → atomics/{name}.py  (FunctionTool + thin LlmAgent wrapper)  │
-│                                                                        │
-│      COMPOSITE → SEQUENTIAL:                                          │
-│        renders adk_sequential_agent.py.j2                            │
-│        → orchestrators/{name}.py  (SequentialAgent)                 │
-│                                                                        │
-│      COMPOSITE → PARALLEL:                                           │
-│        renders adk_parallel_agent.py.j2                              │
-│        → orchestrators/{name}.py  (ParallelAgent)                   │
-│                                                                        │
-│      COMPOSITE → LOOP:                                               │
-│        renders adk_loop_agent.py.j2                                  │
-│        → orchestrators/{name}.py  (LoopAgent, max_iterations=10)    │
-│                                                                        │
-│      COMPOSITE → LLM_COORDINATOR:                                    │
-│        renders adk_coordinator_agent.py.j2                           │
-│        → orchestrators/{name}.py  (LlmAgent routing to sub_agents)  │
-│                                                                        │
-│    • Every compiled node exports a {name}_agent symbol               │
-│    • Orchestrators import only their direct children                 │
-│    • Root orchestrator imported by run.py (interactive CLI entrypoint│
-└──────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│ 6. Verify-and-Repair Loop  (subprocess + ToolImplementorAgent)       │
-│    • Runs: python -c "import run" in the generated project dir       │
-│    • On failure: parses traceback for  atomics/<name>.py  reference  │
-│    • Finds the corresponding SkillNode, clears implementation,       │
-│      re-calls ToolImplementorAgent for that node only                │
-│    • Rewrites the file and retries import (up to 3 iterations)       │
-│    • If still failing: surfaces error in events.status for the UI    │
-│      rather than silently returning a broken project                 │
-└──────────────────────────────────────────────────────────────────────┘
-        │
-        ▼
- [output/{project_name}/]  ← executable Google ADK project
+        |
+        v
+  init tree: root = SkillNode(requirement), current_layer = 0
+        |
+        | <------------------------------ OUTER LOOP (while True) ---------------------------------+
+        v                                                                                          |
+  get nodes at current_layer depth                                                                |
+        |                                                                                          |
+        +-- all ATOMIC? --> any nodes at layer+1? --no--> EXIT LOOP (all layers done)             |
+        |                          |                                                               |
+        |                         yes                                                              |
+        |                          |                                                               |
+        |                          v                                                               |
+        |                   current_layer += 1 ------------------------------------------------->+
+        |                                                                                          (continue)
+        | has non-atomic nodes
+        v
+  snapshot tree state  <-- taken BEFORE decompose so rollback is correct-by-construction
+        |
+        v
+  +------------------------------------------+
+  | Decomposer Agent  (claude-haiku)         |
+  |  classify each non-atomic node:          |
+  |    COMPOSITE -> draft 2-5 sub-skills,    |
+  |                 assign composition_type: |
+  |                   SEQUENTIAL             |
+  |                   PARALLEL               |
+  |                   LOOP                   |
+  |                   LLM_COORDINATOR        |
+  |    ATOMIC    -> assign exec_type:        |
+  |                   DETERMINISTIC_CODE     |
+  |                   EXTERNAL_API           |
+  |                   LLM_PROMPT             |
+  +------------------------------------------+
+        |
+        v
+  +------------------------------------------+
+  | Complexity Reviewer  (claude-haiku)      |
+  |  scan all nodes at current layer;        |
+  |  attach review_note to flagged nodes:    |
+  |    OVER-SPLIT, TOO-MANY-CHILDREN,        |
+  |    REDUNDANT                             |
+  |  (shown as warnings in dashboard)        |
+  +------------------------------------------+
+        |
+        v
+  ##################################################
+  #  HITL-1: Structure Review  (dashboard)         #
+  ##################################################
+        |
+        +-- ROLLBACK? --> restore snapshot -> current_layer unchanged --------------------------->+
+        |                 (phantom children gone, no cascading purge needed)                      (continue)
+        |
+        +-- RE-DECOMPOSE NODE? -------+
+        |   (human edits description  |
+        |    + optional hint)         v
+        |                     reset that node only:
+        |                       children.clear()
+        |                       node_type = UNKNOWN
+        |                     re-call Decomposer on
+        |                     that node with hint
+        |                             |
+        |                     back to HITL-1 <-- INNER LOOP (siblings untouched)
+        |
+        +-- APPROVE?
+        |
+        v
+  +------------------------------------------+
+  | Schema Architect  (claude-haiku, batch=5)|
+  |  walk ENTIRE tree for unhydrated ATOMICs |
+  |  (not just current layer; catches nodes  |
+  |   from any prior approved layer)         |
+  |  generate input_schema + output_schema   |
+  +------------------------------------------+
+        |
+        v
+  +------------------------------------------+
+  | Prompt Engineer  (claude-haiku)          |
+  |  for each LLM_PROMPT atomic without      |
+  |  instruction yet:                        |
+  |    generate full system prompt           |
+  |    populate state_reads, state_writes    |
+  +------------------------------------------+
+        |
+        v
+  +------------------------------------------+
+  | Tool Implementor  (claude-sonnet, 1/call)|
+  |  for each DETERMINISTIC_CODE /           |
+  |  EXTERNAL_API atomic without impl yet:   |
+  |    generate Python function body         |
+  |    _normalise_indent                     |
+  |    _check_syntax (ast.parse)             |
+  |    if SyntaxError: retry up to x2        |
+  +------------------------------------------+
+        |
+        v
+  ##################################################
+  #  HITL-2: Implementation Review  (dashboard)    #
+  ##################################################
+        |
+        +-- ROLLBACK? --> restore snapshot -> schemas + impls discarded ----------------------->+
+        |                 (same layer retried from Decomposer)                                   (continue)
+        |
+        +-- APPROVE?
+        |
+        v
+  save layer checkpoint; current_layer += 1 ----------------------------------------------------+
+                                                                                                  (continue)
+
+  (exit loop when all layers done)
+        |
+        v
+  +------------------------------------------+
+  | Compiler  (Jinja2, no LLM)              |
+  |  normalise names to snake_case           |
+  |  depth-first recursive walk:            |
+  |                                          |
+  |  ATOMIC -> LLM_PROMPT                    |
+  |    adk_llm_agent_stub.py.j2             |
+  |    -> atomics/{name}.py  (LlmAgent)     |
+  |                                          |
+  |  ATOMIC -> DETERMINISTIC_CODE /         |
+  |            EXTERNAL_API                 |
+  |    adk_tool_stub.py.j2                  |
+  |    -> atomics/{name}.py                 |
+  |       (FunctionTool + LlmAgent wrapper) |
+  |                                          |
+  |  COMPOSITE -> SEQUENTIAL                |
+  |    -> orchestrators/{name}.py           |
+  |       (SequentialAgent)                 |
+  |                                          |
+  |  COMPOSITE -> PARALLEL                  |
+  |    -> orchestrators/{name}.py           |
+  |       (ParallelAgent)                   |
+  |                                          |
+  |  COMPOSITE -> LOOP                      |
+  |    -> orchestrators/{name}.py           |
+  |       (LoopAgent, max_iterations=10)    |
+  |                                          |
+  |  COMPOSITE -> LLM_COORDINATOR           |
+  |    -> orchestrators/{name}.py           |
+  |       (LlmAgent with routing prompt)    |
+  |                                          |
+  |  root -> run.py (interactive CLI)       |
+  +------------------------------------------+
+        |
+        v
+  +------------------------------------------+    import     +--------------------+
+  | Verify-and-Repair  (subprocess, up to x3)|   passes  -> | output/            |
+  |  python -c "import run"                  |              | {project_name}/    |
+  |  on failure:                             |              | (ADK project)      |
+  |    parse traceback -> atomics/{x}.py     |              +--------------------+
+  |    clear node.implementation             |
+  |    re-call Tool Implementor (that node)  |
+  |    rewrite file -> retry import          |
+  |  after x3 failures: surface in UI status|
+  +------------------------------------------+
 ```
 
 ---
@@ -215,14 +231,14 @@ Every node (atomic or composite) exports a `{name}_agent` symbol. Orchestrators 
 Rollback is **correct-by-construction**. Before the Decomposer runs on layer N, a full snapshot of the tree is saved. Rolling back restores from that snapshot — since the snapshot existed before children were generated, all phantom branches are eliminated atomically. No explicit cascading purge algorithm is needed.
 
 ```
-snapshot(layer=N, root=tree.root.copy())   ← taken BEFORE decompose
-decompose(layer N nodes) → phantom children created
-─── human clicks Rollback ───
-tree.root = restore(snapshot(layer=N))     ← phantom children gone
+snapshot(layer=N, root=tree.root.copy())   <- taken BEFORE decompose
+decompose(layer N nodes) -> phantom children created
+--- human clicks Rollback ---
+tree.root = restore(snapshot(layer=N))     <- phantom children gone
 tree.current_layer = N
 ```
 
-For **per-node re-decompose** (added in the 2026-06-21 update), the pipeline does not use the snapshot. Instead:
+For **per-node re-decompose**, the pipeline does not touch the snapshot. Instead:
 1. The targeted node's `children` are cleared and its `node_type` reset to `UNKNOWN`.
 2. The Decomposer is called on just that node with an optional human-supplied hint prepended as a user-turn prefix.
 3. Sibling nodes are untouched; the layer does not need a full rollback.
@@ -241,10 +257,10 @@ recur-agent/
 ├── src/
 │   ├── orchestrator/
 │   │   ├── state.py                     # SkillNode, SkillTree, LayerSnapshot, rollback()
-│   │   └── pipeline.py                  # Main async loop (snapshot → decompose →
-│   │                                    #   complexity-review → HITL-1 → schema →
-│   │                                    #   prompt-engineer → tool-implement → HITL-2 →
-│   │                                    #   compile → verify-repair)
+│   │   └── pipeline.py                  # Main async loop (snapshot -> decompose ->
+│   │                                    #   complexity-review -> HITL-1 -> schema ->
+│   │                                    #   prompt-engineer -> tool-implement -> HITL-2 ->
+│   │                                    #   compile -> verify-repair)
 │   ├── agents/
 │   │   ├── base_agent.py                # Anthropic SDK wrapper + retry + token tracking
 │   │   ├── decomposer.py                # DecomposerAgent (ADK constraints baked into prompt)
