@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>recur-agent</title>
+  <style>
+    /* ── Reset & tokens ──────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --font: "Inter", system-ui, -apple-system, sans-serif;
+      --bg: #f7f7f5;
+      --surface: #ffffff;
+      --border: #e5e5e3;
+      --border-strong: #d0d0cc;
+      --text-primary: #1a1a18;
+      --text-secondary: #6b6b69;
+      --text-tertiary: #9b9b99;
+      --accent: #d97706;
+      --accent-light: #fef3c7;
+      --accent-dim: #f59e0b;
+      --claude-orange: #da7756;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+      --shadow-md: 0 4px 12px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.04);
+    }
+
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    /* ── Nav ─────────────────────────────────────────────────────────────── */
+    nav {
+      display: flex;
+      align-items: center;
+      padding: 14px 40px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+      color: var(--text-primary);
+    }
+
+    .logo-mark {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -0.5px;
+    }
+
+    .logo-text {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .logo-sub {
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text-tertiary);
+      margin-left: 2px;
+    }
+
+    /* ── Main ────────────────────────────────────────────────────────────── */
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 80px 24px 60px;
+      gap: 0;
+    }
+
+    .hero {
+      text-align: center;
+      max-width: 580px;
+      margin-bottom: 48px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--claude-orange);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 18px;
+      padding: 4px 10px;
+      background: #fdf2ee;
+      border-radius: 20px;
+      border: 1px solid #f9d9cd;
+    }
+
+    h1 {
+      font-size: 42px;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1.1;
+      color: var(--text-primary);
+      margin-bottom: 16px;
+    }
+
+    h1 span {
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .subtitle {
+      font-size: 16px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      font-weight: 400;
+    }
+
+    /* ── Form card ───────────────────────────────────────────────────────── */
+    .form-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-md);
+      padding: 32px;
+      width: 100%;
+      max-width: 580px;
+    }
+
+    .field {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-primary);
+      margin-bottom: 7px;
+      letter-spacing: -0.01em;
+    }
+
+    label .hint {
+      font-weight: 400;
+      color: var(--text-tertiary);
+      margin-left: 4px;
+    }
+
+    textarea, input[type="text"] {
+      width: 100%;
+      font-family: var(--font);
+      font-size: 14px;
+      color: var(--text-primary);
+      background: var(--bg);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      line-height: 1.5;
+      resize: none;
+    }
+
+    textarea:focus, input[type="text"]:focus {
+      border-color: var(--claude-orange);
+      box-shadow: 0 0 0 3px rgba(217, 119, 86, 0.12);
+      background: var(--surface);
+    }
+
+    textarea {
+      min-height: 110px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    /* ── Submit button ───────────────────────────────────────────────────── */
+    .btn-submit {
+      width: 100%;
+      margin-top: 8px;
+      padding: 13px 20px;
+      font-family: var(--font);
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      letter-spacing: -0.01em;
+      transition: opacity 0.15s, transform 0.1s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn-submit:hover { opacity: 0.92; transform: translateY(-1px); }
+    .btn-submit:active { transform: translateY(0); }
+    .btn-submit:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    /* Spinner */
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .btn-submit.loading .spinner { display: block; }
+    .btn-submit.loading .btn-label { display: none; }
+
+    /* ── Error ───────────────────────────────────────────────────────────── */
+    .error-msg {
+      display: none;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #b91c1c;
+      margin-top: 12px;
+    }
+
+    /* ── Footer ──────────────────────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      padding: 20px;
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    /* ── How it works ────────────────────────────────────────────────────── */
+    .steps {
+      display: flex;
+      gap: 12px;
+      margin-top: 40px;
+      max-width: 580px;
+      width: 100%;
+    }
+
+    .step {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+    }
+
+    .step-num {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--claude-orange);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 6px;
+    }
+
+    .step-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .step-desc {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    /* ── Existing projects ───────────────────────────────────────────────── */
+    .projects-section {
+      margin-top: 48px;
+      max-width: 580px;
+      width: 100%;
+    }
+
+    .projects-heading {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 12px;
+    }
+
+    .projects-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .project-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .project-row:hover {
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .project-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+
+    .btn-run-project {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 14px;
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-run-project:hover { opacity: 0.88; }
+    .btn-run-project:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .run-status {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 4px;
+    }
+
+    /* Mini log terminal */
+    .mini-log-wrap {
+      margin-top: 16px;
+      background: #0f0f0e;
+      border: 1.5px solid #2a2a28;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      display: none;
+    }
+
+    .mini-log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: #1a1a18;
+      border-bottom: 1px solid #2a2a28;
+    }
+
+    .mini-log-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #6b6b69;
+    }
+
+    .mini-log {
+      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      color: #d4d4d0;
+      padding: 10px 14px;
+      max-height: 280px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .mini-log .log-ok  { color: #4ade80; }
+    .mini-log .log-err { color: #f87171; }
+
+    .mini-ready-banner {
+      margin-top: 12px;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background: #f0fdf4;
+      border: 1.5px solid #bbf7d0;
+      border-radius: var(--radius-sm);
+    }
+
+    .mini-ready-banner span {
+      flex: 1;
+      font-size: 13px;
+      font-weight: 600;
+      color: #16a34a;
+    }
+
+    .btn-open-chat-mini {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 7px 14px;
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 600;
+      background: linear-gradient(135deg, #16a34a, #15803d);
+      color: #fff;
+      text-decoration: none;
+      border-radius: 6px;
+    }
+    .btn-open-chat-mini:hover { opacity: 0.88; }
+
+    .btn-stop-mini {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 12px;
+      font-family: var(--font);
+      font-size: 11px;
+      font-weight: 500;
+      background: transparent;
+      color: #dc2626;
+      border: 1.5px solid #fecaca;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .btn-stop-mini:hover { background: #fef2f2; }
+
+    .spinner-mini {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="logo" href="/">
+    <div class="logo-mark">RA</div>
+    <span class="logo-text">recur-agent</span>
+    <span class="logo-sub">/ platform engine</span>
+  </a>
+</nav>
+
+<main>
+  <div class="hero">
+    <div class="eyebrow">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+        <circle cx="5" cy="5" r="5"/>
+      </svg>
+      Recursive skill decomposition
+    </div>
+    <h1>Turn a requirement<br />into an <span>agent framework</span></h1>
+    <p class="subtitle">Describe what your agent should do. The platform engine recursively decomposes it into atomic skills — with you in the loop at every layer.</p>
+  </div>
+
+  <div class="form-card">
+    <form id="start-form" onsubmit="handleSubmit(event)">
+      <div class="field">
+        <label for="requirement">
+          Requirement
+          <span class="hint">— describe the agent you want to build</span>
+        </label>
+        <textarea
+          id="requirement"
+          name="requirement"
+          placeholder="e.g. Build a Slack bot that monitors Stripe payments and alerts on failures, with weekly digest emails"
+          required
+        ></textarea>
+      </div>
+
+      <div class="row">
+        <div class="field" style="margin-bottom:0">
+          <label for="project_name">
+            Project name
+            <span class="hint">— snake_case identifier</span>
+          </label>
+          <input
+            type="text"
+            id="project_name"
+            name="project_name"
+            placeholder="stripe_alerter"
+            pattern="[a-zA-Z][a-zA-Z0-9_]*"
+            required
+          />
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label for="output_dir">
+            Output directory
+            <span class="hint">— optional</span>
+          </label>
+          <input
+            type="text"
+            id="output_dir"
+            name="output_dir"
+            placeholder="./output"
+          />
+        </div>
+      </div>
+
+      <button type="submit" class="btn-submit" id="submit-btn">
+        <span class="spinner"></span>
+        <span class="btn-label">Start decomposition →</span>
+      </button>
+
+      <div class="error-msg" id="error-msg"></div>
+    </form>
+  </div>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">Step 1</div>
+      <div class="step-title">Decompose</div>
+      <div class="step-desc">The engine recursively breaks your requirement into atomic skills using Claude.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">Step 2</div>
+      <div class="step-title">Review</div>
+      <div class="step-desc">You approve or roll back each decomposition layer before it advances.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">Step 3</div>
+      <div class="step-title">Compile</div>
+      <div class="step-desc">A ready-to-run Google ADK project is generated from the verified skill tree.</div>
+    </div>
+  </div>
+
+  <!-- Existing projects -->
+  <div class="projects-section" id="projects-section" style="display:none">
+    <div class="projects-heading">Previously compiled projects</div>
+    <div class="projects-list" id="projects-list"></div>
+
+    <!-- Shared log/ready panel (one at a time) -->
+    <div class="mini-log-wrap" id="mini-log-wrap">
+      <div class="mini-log-header">
+        <span class="mini-log-title">Sandbox setup</span>
+        <button class="btn-stop-mini" onclick="stopMiniSandbox()">■ Stop</button>
+      </div>
+      <pre class="mini-log" id="mini-log"></pre>
+    </div>
+    <div class="mini-ready-banner" id="mini-ready-banner">
+      <span>✓ Agent chat ready</span>
+      <a id="mini-open-link" href="#" target="_blank" class="btn-open-chat-mini">Open Chat →</a>
+    </div>
+  </div>
+</main>
+
+<footer>recur-agent &mdash; human-in-the-loop skill tree compiler</footer>
+
+<script>
+async function handleSubmit(e) {
+  e.preventDefault();
+  const form = e.target;
+  const btn = document.getElementById('submit-btn');
+  const errEl = document.getElementById('error-msg');
+  errEl.style.display = 'none';
+
+  const requirement = form.requirement.value.trim();
+  const project_name = form.project_name.value.trim();
+  const output_dir = form.output_dir.value.trim() || null;
+
+  // Validate project_name
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(project_name)) {
+    showError('Project name must be a valid Python identifier (letters, digits, underscore; start with a letter).');
+    return;
+  }
+
+  btn.classList.add('loading');
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requirement, project_name, output_dir }),
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+
+    // Redirect to the dashboard
+    window.location.href = '/dashboard';
+  } catch (err) {
+    showError(err.message);
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+// If a pipeline is already running, redirect to dashboard
+(async () => {
+  try {
+    const r = await fetch('/status');
+    if (r.ok) {
+      const { status } = await r.json();
+      if (status && status !== 'idle' && status !== 'done') {
+        window.location.href = '/dashboard';
+      }
+    }
+  } catch {}
+})();
+
+// ── Existing projects ─────────────────────────────────────────────────────────
+let miniSSE = null;
+let miniActiveProject = null;
+
+(async () => {
+  try {
+    const r = await fetch('/projects');
+    if (!r.ok) return;
+    const { projects } = await r.json();
+    if (!projects || projects.length === 0) return;
+
+    const section = document.getElementById('projects-section');
+    const list = document.getElementById('projects-list');
+    section.style.display = 'block';
+    list.innerHTML = '';
+
+    for (const proj of projects) {
+      const row = document.createElement('div');
+      row.className = 'project-row';
+      row.id = `project-row-${proj.name}`;
+      row.innerHTML = `
+        <div>
+          <div class="project-name">${proj.name}</div>
+          <div class="run-status" id="run-status-${proj.name}"></div>
+        </div>
+        <button class="btn-run-project" id="btn-run-${proj.name}" onclick="runProject('${proj.name}', this)">
+          ▶ Run
+        </button>
+      `;
+      list.appendChild(row);
+    }
+
+    // If sandbox already running, restore state
+    const sr = await fetch('/sandbox/status');
+    if (sr.ok) {
+      const { status } = await sr.json();
+      if (status === 'ready' && miniActiveProject) {
+        showMiniReady(miniActiveProject);
+      }
+    }
+  } catch {}
+})();
+
+async function runProject(projectName, btn) {
+  if (miniActiveProject && miniActiveProject !== projectName) {
+    await stopMiniSandbox();
+  }
+  miniActiveProject = projectName;
+
+  // Reset UI
+  document.getElementById('mini-ready-banner').style.display = 'none';
+  const logWrap = document.getElementById('mini-log-wrap');
+  logWrap.style.display = 'block';
+  document.getElementById('mini-log').textContent = '';
+
+  // Disable all run buttons
+  document.querySelectorAll('.btn-run-project').forEach(b => {
+    b.disabled = true;
+    if (b.id === `btn-run-${projectName}`) {
+      b.innerHTML = '<span class="spinner-mini"></span>';
+    }
+  });
+
+  try {
+    const r = await fetch(`/sandbox/start/${projectName}`, { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      miniLog('✗ ' + (d.detail || 'Failed to start'));
+      resetMiniButtons();
+      return;
+    }
+    await r.json();
+    openMiniSSE(projectName);
+  } catch (err) {
+    miniLog('✗ ' + err.message);
+    resetMiniButtons();
+  }
+}
+
+function miniLog(line) {
+  const pre = document.getElementById('mini-log');
+  if (!pre) return;
+  const span = document.createElement('span');
+  if (line.startsWith('✓') || line.startsWith('▶')) span.className = 'log-ok';
+  else if (line.startsWith('✗') || line.toLowerCase().includes('error')) span.className = 'log-err';
+  span.textContent = line + '\n';
+  pre.appendChild(span);
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function openMiniSSE(projectName) {
+  if (miniSSE) { miniSSE.close(); miniSSE = null; }
+  miniSSE = new EventSource('/sandbox/logs');
+  miniSSE.onmessage = (e) => {
+    const line = e.data;
+    miniLog(line);
+    if (line.includes('Agent chat ready')) {
+      showMiniReady(projectName);
+      resetMiniButtons();
+      // Keep stream open to show runtime logs
+    } else if (line.startsWith('✗')) {
+      resetMiniButtons();
+      // Keep stream open to show full error context
+    }
+  };
+  miniSSE.onerror = () => { if (miniSSE) { miniSSE.close(); miniSSE = null; } resetMiniButtons(); };
+}
+
+function showMiniReady(projectName) {
+  const banner = document.getElementById('mini-ready-banner');
+  const link = document.getElementById('mini-open-link');
+  link.href = `/chat/${projectName}`;
+  banner.style.display = 'flex';
+}
+
+function resetMiniButtons() {
+  document.querySelectorAll('.btn-run-project').forEach(b => {
+    b.disabled = false;
+    b.innerHTML = '▶ Run';
+  });
+}
+
+async function stopMiniSandbox() {
+  if (miniSSE) { miniSSE.close(); miniSSE = null; }
+  await fetch('/sandbox/stop', { method: 'POST' });
+  document.getElementById('mini-log-wrap').style.display = 'none';
+  document.getElementById('mini-ready-banner').style.display = 'none';
+  resetMiniButtons();
+  miniActiveProject = null;
+}
+</script>
+
+</body>
+</html>

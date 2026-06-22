@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: recur-agent
+Version: 0.1.0
+Summary: Recursive agentic platform engine for generating agentic workflows.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: anthropic>=0.92.0
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.30.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: jinja2>=3.1.0
+Requires-Dist: aiofiles>=23.0.0
+Requires-Dist: pyyaml>=6.0.0
+Requires-Dist: anyio>=4.0.0
+
 # recur-agent
 
 An LLM-driven platform engine that **recursively decomposes** a high-level software requirement into a granular, human-approved skill tree, then **compiles** that tree into an executable **Google ADK** agent framework.

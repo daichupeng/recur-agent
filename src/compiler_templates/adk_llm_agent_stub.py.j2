@@ -1,0 +1,17 @@
+"""{{ node.name }} — atomic LLM skill."""
+from google.adk.agents import LlmAgent
+
+{{ node.name }}_agent = LlmAgent(
+    name="{{ node.name }}",
+    model="gemini-2.0-flash",
+    instruction="""{{ node.instruction if node.instruction else node.description }}
+{%- if not node.instruction %}
+
+Inputs available in session state:
+{{ node.input_schema | tojson(indent=2) }}
+
+Write your output to session state matching this schema:
+{{ node.output_schema | tojson(indent=2) }}
+{%- endif %}
+""",
+)

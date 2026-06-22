@@ -1,0 +1,14 @@
+"""{{ node.name }} — parallel orchestrator."""
+from google.adk.agents import ParallelAgent
+{%- for imp in child_imports %}
+from {{ imp.module }} import {{ imp.symbol }}
+{%- endfor %}
+
+{{ node.name }}_agent = ParallelAgent(
+    name="{{ node.name }}",
+    sub_agents=[
+{%- for imp in child_imports %}
+        {{ imp.symbol }},
+{%- endfor %}
+    ],
+)

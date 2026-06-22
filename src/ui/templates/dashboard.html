@@ -1,0 +1,2200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>recur-agent — dashboard</title>
+  <style>
+    /* ── Reset & tokens ──────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --font: "Inter", system-ui, -apple-system, sans-serif;
+      --bg: #f7f7f5;
+      --surface: #ffffff;
+      --surface-2: #f9f9f7;
+      --border: #e5e5e3;
+      --border-strong: #d0d0cc;
+      --text-primary: #1a1a18;
+      --text-secondary: #6b6b69;
+      --text-tertiary: #9b9b99;
+      --claude-orange: #da7756;
+      --accent: #d97706;
+      --green: #16a34a;
+      --green-bg: #f0fdf4;
+      --green-border: #bbf7d0;
+      --blue: #2563eb;
+      --blue-bg: #eff6ff;
+      --blue-border: #bfdbfe;
+      --amber: #d97706;
+      --amber-bg: #fffbeb;
+      --amber-border: #fde68a;
+      --red: #dc2626;
+      --red-bg: #fef2f2;
+      --red-border: #fecaca;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,.06);
+      --shadow-md: 0 4px 12px rgba(0,0,0,.08);
+    }
+
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    html, body { height: 100%; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text-primary);
+      display: grid;
+      grid-template-rows: 56px 1fr;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Topbar ──────────────────────────────────────────────────────────── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-decoration: none;
+      color: var(--text-primary);
+      flex-shrink: 0;
+    }
+
+    .logo-mark {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .logo-text {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .topbar-divider {
+      width: 1px;
+      height: 20px;
+      background: var(--border);
+    }
+
+    .topbar-project {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      flex: 1;
+    }
+
+    .topbar-project strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    /* Status pill */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+      flex-shrink: 0;
+    }
+
+    .status-pill .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+    }
+
+    .status-pill.processing {
+      background: var(--amber-bg);
+      border-color: var(--amber-border);
+      color: var(--amber);
+    }
+    .status-pill.processing .dot {
+      background: var(--amber);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .status-pill.review {
+      background: var(--blue-bg);
+      border-color: var(--blue-border);
+      color: var(--blue);
+    }
+    .status-pill.review .dot {
+      background: var(--blue);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .status-pill.done {
+      background: var(--green-bg);
+      border-color: var(--green-border);
+      color: var(--green);
+    }
+    .status-pill.done .dot { background: var(--green); }
+
+    .status-pill.idle {
+      background: var(--surface-2);
+      border-color: var(--border);
+      color: var(--text-tertiary);
+    }
+    .status-pill.idle .dot { background: var(--text-tertiary); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* ── Layout ──────────────────────────────────────────────────────────── */
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────────────────── */
+    .sidebar {
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    .sidebar-section {
+      padding: 20px 20px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sidebar-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-tertiary);
+      margin-bottom: 10px;
+    }
+
+    .requirement-text {
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+      font-style: italic;
+    }
+
+    /* Layer progress */
+    .layer-list {
+      list-style: none;
+      padding: 4px 0;
+    }
+
+    .layer-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: background 0.1s;
+    }
+
+    .layer-item:hover { background: var(--bg); }
+
+    .layer-item.active {
+      background: var(--amber-bg);
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .layer-item .layer-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--border-strong);
+      flex-shrink: 0;
+    }
+
+    .layer-item.done-layer .layer-dot { background: var(--green); }
+    .layer-item.active .layer-dot { background: var(--amber); }
+
+    .layer-count {
+      margin-left: auto;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1px 7px;
+    }
+
+    /* ── Actions panel ───────────────────────────────────────────────────── */
+    .action-panel {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .action-panel .actions-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-tertiary);
+    }
+
+    .btn-approve, .btn-rollback {
+      width: 100%;
+      padding: 10px 16px;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: var(--radius-sm);
+      border: none;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      letter-spacing: -0.01em;
+    }
+
+    .btn-approve {
+      background: linear-gradient(135deg, #16a34a, #15803d);
+      color: #fff;
+    }
+    .btn-approve:hover { opacity: 0.88; transform: translateY(-1px); }
+
+    .btn-rollback {
+      background: var(--surface-2);
+      color: var(--red);
+      border: 1.5px solid var(--red-border);
+    }
+    .btn-rollback:hover { background: var(--red-bg); }
+
+    .btn-approve:disabled, .btn-rollback:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none !important;
+    }
+
+    /* ── Main content ────────────────────────────────────────────────────── */
+    .content {
+      overflow-y: auto;
+      padding: 24px;
+    }
+
+    /* ── Layer header ────────────────────────────────────────────────────── */
+    .layer-header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .layer-header h2 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+
+    .layer-header .node-count {
+      font-size: 13px;
+      color: var(--text-tertiary);
+      font-weight: 400;
+    }
+
+    /* ── Node grid ───────────────────────────────────────────────────────── */
+    .node-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 14px;
+    }
+
+    /* ── Node card ───────────────────────────────────────────────────────── */
+    .node-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      transition: box-shadow 0.15s, border-color 0.15s;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .node-card:hover {
+      box-shadow: var(--shadow-md);
+      border-color: var(--border-strong);
+    }
+
+    .node-card.atomic  { border-top: 3px solid var(--green); }
+    .node-card.composite { border-top: 3px solid var(--blue); }
+    .node-card.unknown { border-top: 3px solid var(--amber); }
+
+    /* Card header row */
+    .card-top {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .type-badge {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 3px 8px;
+      border-radius: 20px;
+      border: 1px solid transparent;
+      margin-top: 1px;
+    }
+
+    .type-badge.atomic   { background: var(--green-bg); color: var(--green); border-color: var(--green-border); }
+    .type-badge.composite { background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }
+    .type-badge.unknown  { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }
+
+    .exec-badge {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      margin-top: 1px;
+    }
+
+    /* Editable name */
+    .node-name {
+      font-size: 14px;
+      font-weight: 600;
+      flex: 1;
+      letter-spacing: -0.02em;
+      line-height: 1.3;
+      border: 1.5px solid transparent;
+      border-radius: 4px;
+      padding: 2px 5px;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+      word-break: break-word;
+      min-width: 0;
+    }
+
+    .node-name:focus {
+      border-color: var(--claude-orange);
+      background: #fdf8f6;
+    }
+
+    /* Editable description */
+    .node-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.55;
+      border: 1.5px solid transparent;
+      border-radius: 4px;
+      padding: 6px 8px;
+      resize: vertical;
+      font-family: var(--font);
+      width: 100%;
+      outline: none;
+      background: transparent;
+      transition: border-color 0.15s, background 0.15s;
+      min-height: 58px;
+    }
+
+    .node-desc:focus {
+      border-color: var(--claude-orange);
+      background: #fdf8f6;
+    }
+
+    /* Children list */
+    .children-section {
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+
+    .children-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-tertiary);
+      margin-bottom: 6px;
+    }
+
+    .children-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .children-list li {
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .children-list li::before {
+      content: '';
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--border-strong);
+      flex-shrink: 0;
+    }
+
+    /* Editable children rows (HITL-1 composite cards) */
+    .children-edit-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .child-edit-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 7px 10px;
+    }
+
+    .child-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      border: 1.5px solid transparent;
+      border-radius: 4px;
+      padding: 1px 4px;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+      word-break: break-word;
+    }
+
+    .child-name:focus {
+      border-color: var(--claude-orange);
+      background: #fdf8f6;
+    }
+
+    .child-desc {
+      font-size: 11px;
+      color: var(--text-secondary);
+      line-height: 1.45;
+      border: 1.5px solid transparent;
+      border-radius: 4px;
+      padding: 4px 6px;
+      resize: vertical;
+      font-family: var(--font);
+      width: 100%;
+      outline: none;
+      background: transparent;
+      transition: border-color 0.15s, background 0.15s;
+      min-height: 38px;
+    }
+
+    .child-desc:focus {
+      border-color: var(--blue);
+      background: var(--blue-bg);
+    }
+
+    /* Editable fields inside HITL-2 impl cards */
+    .impl-editable-field {
+      width: 100%;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      background: var(--surface-2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    .impl-editable-field:focus {
+      border-color: #7c3aed;
+      background: #f5f3ff;
+    }
+
+    .impl-editable-code {
+      width: 100%;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #d4d4d0;
+      background: #0f0f0e;
+      border: 1.5px solid #2a2a28;
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      resize: vertical;
+      outline: none;
+      min-height: 140px;
+      transition: border-color 0.15s;
+    }
+
+    .impl-editable-code:focus {
+      border-color: #7c3aed;
+    }
+
+    .impl-save-btn {
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 14px;
+      background: #f5f3ff;
+      color: #7c3aed;
+      border: 1.5px solid #ddd6fe;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+    .impl-save-btn:hover { background: #ede9fe; }
+    .impl-save-btn.saved { background: var(--green-bg); border-color: var(--green-border); color: var(--green); }
+
+    /* Save button */
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .save-btn {
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 12px;
+      background: var(--surface-2);
+      color: var(--text-secondary);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+
+    .save-btn:hover { background: var(--bg); color: var(--text-primary); }
+    .save-btn.saved { background: var(--green-bg); border-color: var(--green-border); color: var(--green); }
+
+    /* ── Empty & done states ─────────────────────────────────────────────── */
+    .state-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 48px 32px;
+      text-align: center;
+      max-width: 480px;
+      margin: 40px auto;
+    }
+
+    .state-icon {
+      font-size: 42px;
+      margin-bottom: 16px;
+    }
+
+    .state-title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 8px;
+    }
+
+    .state-desc {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .state-card.done-card { border-color: var(--green-border); }
+
+    .output-path {
+      display: inline-block;
+      margin-top: 16px;
+      padding: 8px 14px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 12px;
+      color: var(--text-secondary);
+      word-break: break-all;
+    }
+
+    .btn-new {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 20px;
+      padding: 10px 20px;
+      font-family: var(--font);
+      font-size: 14px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      color: #fff;
+      text-decoration: none;
+      border-radius: var(--radius-sm);
+      transition: opacity 0.15s;
+    }
+
+    .btn-new:hover { opacity: 0.88; }
+
+    /* ── Scrollbar ───────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+
+    /* ── Tabs ────────────────────────────────────────────────────────────── */
+    .tab-bar {
+      display: flex;
+      gap: 2px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0;
+    }
+
+    .tab-btn {
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 8px 16px;
+      border: none;
+      background: none;
+      cursor: pointer;
+      color: var(--text-tertiary);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      border-radius: 4px 4px 0 0;
+      transition: color 0.15s;
+    }
+
+    .tab-btn:hover { color: var(--text-secondary); }
+
+    .tab-btn.active {
+      color: var(--text-primary);
+      font-weight: 600;
+      border-bottom-color: var(--claude-orange);
+    }
+
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ── Tree visualization ──────────────────────────────────────────────── */
+    .tree-container {
+      font-size: 13px;
+    }
+
+    .tree-node {
+      position: relative;
+    }
+
+    .tree-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+      cursor: default;
+      transition: background 0.1s;
+      user-select: none;
+    }
+
+    .tree-row:hover { background: var(--surface-2); }
+
+    .tree-row.composite { cursor: pointer; }
+
+    .tree-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      font-size: 9px;
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+      transition: transform 0.15s;
+    }
+
+    .tree-toggle.open { transform: rotate(90deg); }
+    .tree-toggle.leaf { opacity: 0; pointer-events: none; }
+
+    .tree-node-badge {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 2px 6px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      flex-shrink: 0;
+    }
+
+    .tree-node-badge.atomic   { background: var(--green-bg); color: var(--green); border-color: var(--green-border); }
+    .tree-node-badge.composite { background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }
+    .tree-node-badge.unknown  { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }
+
+    .tree-exec-badge {
+      font-size: 9px;
+      font-weight: 500;
+      padding: 2px 6px;
+      border-radius: 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+    }
+
+    .tree-name {
+      font-weight: 500;
+      color: var(--text-primary);
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tree-desc {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      flex-shrink: 0;
+      max-width: 300px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tree-children {
+      margin-left: 24px;
+      border-left: 1.5px solid var(--border);
+      padding-left: 8px;
+      display: none;
+    }
+
+    .tree-children.open { display: block; }
+
+    /* ── Toast ───────────────────────────────────────────────────────────── */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 1000;
+      pointer-events: none;
+    }
+
+    .toast {
+      padding: 10px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: var(--shadow-md);
+      border: 1px solid transparent;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.2s, transform 0.2s;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    .toast.success { background: var(--green-bg); border-color: var(--green-border); color: var(--green); }
+    .toast.error   { background: var(--red-bg); border-color: var(--red-border); color: var(--red); }
+    .toast.info    { background: var(--blue-bg); border-color: var(--blue-border); color: var(--blue); }
+
+    /* ── Reviewing highlight ─────────────────────────────────────────────── */
+    .review-banner {
+      background: var(--blue-bg);
+      border: 1.5px solid var(--blue-border);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--blue);
+      font-weight: 500;
+    }
+
+    .review-banner svg { flex-shrink: 0; }
+
+    /* ── Impl review ─────────────────────────────────────────────────────── */
+    .impl-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .impl-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .impl-card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+
+    .impl-card-body {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .impl-subsection-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-tertiary);
+      margin-bottom: 6px;
+    }
+
+    .code-block {
+      background: #0f0f0e;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+
+    .code-block-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: #1a1a18;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #6b6b69;
+    }
+
+    .code-block pre {
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #d4d4d0;
+      padding: 12px 14px;
+      margin: 0;
+      overflow-x: auto;
+      white-space: pre;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .schema-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .schema-box {
+      flex: 1;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      overflow: hidden;
+    }
+
+    .schema-pre {
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 160px;
+      overflow-y: auto;
+      margin: 0;
+    }
+
+    .state-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+      font-family: "SF Mono", "Fira Code", monospace;
+    }
+
+    .state-pill.read {
+      background: var(--blue-bg);
+      border: 1px solid var(--blue-border);
+      color: var(--blue);
+    }
+
+    .state-pill.write {
+      background: var(--green-bg);
+      border: 1px solid var(--green-border);
+      color: var(--green);
+    }
+
+    .instruction-text {
+      font-size: 12.5px;
+      line-height: 1.65;
+      color: var(--text-secondary);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .btn-approve-impl {
+      width: 100%;
+      padding: 10px 16px;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: var(--radius-sm);
+      border: none;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      background: linear-gradient(135deg, #7c3aed, #6d28d9);
+      color: #fff;
+    }
+    .btn-approve-impl:hover { opacity: 0.88; transform: translateY(-1px); }
+    .btn-approve-impl:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+
+    .review-banner.impl-banner {
+      background: #f5f3ff;
+      border-color: #ddd6fe;
+      color: #7c3aed;
+    }
+
+    .impl-empty {
+      text-align: center;
+      padding: 40px 24px;
+      color: var(--text-tertiary);
+      font-size: 13px;
+    }
+
+    /* ── Sandbox panel ───────────────────────────────────────────────────── */
+    .sandbox-placeholder {
+      text-align: center;
+      padding: 60px 32px;
+      color: var(--text-tertiary);
+      font-size: 14px;
+    }
+
+    .sandbox-ready-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+      padding: 14px 18px;
+      background: var(--green-bg);
+      border: 1.5px solid var(--green-border);
+      border-radius: var(--radius-sm);
+    }
+
+    .sandbox-ready-header span {
+      flex: 1;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--green);
+    }
+
+    .btn-open-chat {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 600;
+      background: linear-gradient(135deg, #16a34a, #15803d);
+      color: #fff;
+      text-decoration: none;
+      border-radius: var(--radius-sm);
+      transition: opacity 0.15s;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-open-chat:hover { opacity: 0.88; }
+
+    .btn-sandbox-start {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 11px 22px;
+      font-family: var(--font);
+      font-size: 14px;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--claude-orange) 0%, var(--accent) 100%);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn-sandbox-start:hover { opacity: 0.88; transform: translateY(-1px); }
+    .btn-sandbox-start:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .btn-sandbox-stop {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--surface-2);
+      color: var(--red);
+      border: 1.5px solid var(--red-border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .btn-sandbox-stop:hover { background: var(--red-bg); }
+
+    .sandbox-log-wrap {
+      background: #0f0f0e;
+      border: 1.5px solid #2a2a28;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+
+    .sandbox-log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: #1a1a18;
+      border-bottom: 1px solid #2a2a28;
+    }
+
+    .sandbox-log-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #6b6b69;
+    }
+
+    .sandbox-log {
+      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #d4d4d0;
+      padding: 14px 16px;
+      max-height: 420px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .sandbox-log .log-ok   { color: #4ade80; }
+    .sandbox-log .log-err  { color: #f87171; }
+    .sandbox-log .log-info { color: #60a5fa; }
+
+    .sandbox-cta {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      padding: 48px 32px;
+      text-align: center;
+    }
+
+    .sandbox-cta-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+
+    .sandbox-cta-desc {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      max-width: 380px;
+    }
+
+    .sandbox-spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- ── Topbar ──────────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <a class="logo" href="/">
+    <div class="logo-mark">RA</div>
+    <span class="logo-text">recur-agent</span>
+  </a>
+  <div class="topbar-divider"></div>
+  <div class="topbar-project" id="topbar-project">
+    {% if tree %}
+      Project: <strong>{{ tree.project_name }}</strong>
+    {% else %}
+      Loading…
+    {% endif %}
+  </div>
+  <div class="status-pill idle" id="status-pill">
+    <div class="dot"></div>
+    <span id="status-label">{{ status }}</span>
+  </div>
+</div>
+
+<!-- ── Two-column layout ───────────────────────────────────────────────── -->
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    {% if tree %}
+    <div class="sidebar-section">
+      <div class="sidebar-label">Requirement</div>
+      <div class="requirement-text">"{{ tree.requirement }}"</div>
+    </div>
+    {% endif %}
+
+    <!-- Action buttons (shown when reviewing) -->
+    <div class="action-panel" id="action-panel">
+      <div class="actions-label">Actions</div>
+      {% set reviewing = status.startswith("awaiting_review") %}
+      {% set reviewing_impl = status.startswith("awaiting_impl_review") %}
+      <button class="btn-approve" id="btn-approve"
+              {% if not reviewing %}disabled{% endif %}
+              onclick="doApprove(this)">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+          <path d="M2 7L5.5 10.5L11 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Approve &amp; advance
+      </button>
+      <button class="btn-rollback" id="btn-rollback"
+              {% if not reviewing %}disabled{% endif %}
+              onclick="doRollback(this)">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+          <path d="M2 7.5H9.5C10.6 7.5 11.5 6.6 11.5 5.5V5.5C11.5 4.4 10.6 3.5 9.5 3.5H2M2 7.5L4.5 5M2 7.5L4.5 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Roll back layer
+      </button>
+
+      <div style="height:1px;background:var(--border);margin:4px 0;"></div>
+      <div class="actions-label" style="margin-top:4px">Implementation Review</div>
+      <button class="btn-approve-impl" id="btn-approve-impl"
+              {% if not reviewing_impl %}disabled{% endif %}
+              onclick="doApproveImpl(this)">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+          <path d="M2 7L5.5 10.5L11 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Approve &amp; compile
+      </button>
+      <button class="btn-rollback" id="btn-rollback-impl"
+              {% if not reviewing_impl %}disabled{% endif %}
+              onclick="doRollbackImpl(this)">
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+          <path d="M2 7.5H9.5C10.6 7.5 11.5 6.6 11.5 5.5V5.5C11.5 4.4 10.6 3.5 9.5 3.5H2M2 7.5L4.5 5M2 7.5L4.5 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Reject &amp; retry layer
+      </button>
+    </div>
+
+    <!-- Layer history -->
+    <div class="sidebar-section" style="border-bottom:none; flex:1;">
+      <div class="sidebar-label">Layers</div>
+      <ul class="layer-list" id="layer-list">
+        {% if tree %}
+          {% for layer in range(tree.current_layer + 1) %}
+          <li class="layer-item {% if layer < tree.current_layer %}done-layer{% elif layer == tree.current_layer %}active{% endif %}"
+              data-layer="{{ layer }}">
+            <div class="layer-dot"></div>
+            Layer {{ layer }}
+            <span class="layer-count" id="layer-count-{{ layer }}">
+              {{ tree.root.get_nodes_at_depth(layer) | length }}
+            </span>
+          </li>
+          {% endfor %}
+        {% endif %}
+      </ul>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="content" id="content">
+
+    {% if status == "done" %}
+    <!-- ── Done state ──────────────────────────────────────────────────── -->
+    <div class="state-card done-card">
+      <div class="state-icon">✅</div>
+      <div class="state-title">Compilation complete</div>
+      <div class="state-desc">The skill tree has been fully decomposed and compiled into a Google ADK project.</div>
+      <div class="output-path">./output/{{ tree.project_name if tree else '' }}</div>
+      <br/>
+      <a href="/" class="btn-new">← Start a new project</a>
+    </div>
+    {% endif %}
+
+    {% if status == "done" or status == "compiling" or (tree and tree.root.children) %}
+    <!-- ── Tree visualization ─────────────────────────────────────────── -->
+    <div class="tab-bar" id="tab-bar" {% if status not in ("done", "compiling") %}style="margin-top:20px"{% endif %}>
+      {% if status not in ("done", "compiling") %}
+      <button class="tab-btn {% if not status.startswith('awaiting_impl_review') %}active{% endif %}"
+              id="tab-nodes-btn" onclick="switchTab('nodes')">Layer View</button>
+      {% endif %}
+      {% if status.startswith("awaiting_impl_review") or status in ("done", "compiling", "verifying") %}
+      <button class="tab-btn {% if status.startswith('awaiting_impl_review') %}active{% endif %}"
+              id="tab-impl-btn" onclick="switchTab('impl')">Implementation Review</button>
+      {% endif %}
+      <button class="tab-btn {% if status in ('done','compiling') and not status.startswith('awaiting_impl_review') %}active{% endif %}"
+              id="tab-tree-btn" onclick="switchTab('tree')">Tree View</button>
+      <button class="tab-btn" id="tab-sandbox-btn" onclick="switchTab('sandbox')">▶ Sandbox</button>
+    </div>
+    {% endif %}
+
+    <div class="tab-pane {% if status not in ('done','compiling') and not status.startswith('awaiting_impl_review') %}active{% endif %}" id="tab-nodes">
+
+    {% if not nodes or nodes | length == 0 %}
+    <!-- ── Processing / empty ─────────────────────────────────────────── -->
+    {% if status != "done" %}
+    <div class="state-card">
+      <div class="state-icon">⚙️</div>
+      <div class="state-title">Processing…</div>
+      <div class="state-desc">
+        The pipeline is working on layer {{ current_layer }}.
+        This page will refresh automatically.
+      </div>
+    </div>
+    {% endif %}
+
+    {% else %}
+    <!-- ── Node cards ─────────────────────────────────────────────────── -->
+    <div class="layer-header">
+      <h2>Layer {{ current_layer }}</h2>
+      <span class="node-count">{{ nodes | length }} node{{ 's' if nodes | length != 1 else '' }}</span>
+    </div>
+
+    {% if status.startswith("awaiting_review") %}
+    <div class="review-banner">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M8 5v4M8 11v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      Layer {{ current_layer }} is ready for review. Edit any node, then approve to advance or roll back to retry.
+    </div>
+    {% endif %}
+
+    <div class="node-grid" id="node-grid">
+      {% for node in nodes %}
+      <div class="node-card {{ node.node_type.value }}" id="card-{{ node.id }}">
+        <div class="card-top">
+          <span class="type-badge {{ node.node_type.value }}">{{ node.node_type.value }}</span>
+          {% if node.exec_type %}
+            <span class="exec-badge">{{ node.exec_type.value.replace('_', ' ').lower() }}</span>
+          {% endif %}
+          <span class="node-name"
+                contenteditable="true"
+                data-node-id="{{ node.id }}"
+                data-field="name">{{ node.name }}</span>
+        </div>
+
+        <textarea class="node-desc"
+                  data-node-id="{{ node.id }}"
+                  data-field="description"
+                  rows="3">{{ node.description }}</textarea>
+
+        {% if node.children %}
+        <div class="children-section">
+          <div class="children-label">Sub-skills ({{ node.children | length }}) — min 2 required</div>
+          <div class="children-edit-list" id="children-{{ node.id }}">
+            {% for child in node.children %}
+            <div class="child-edit-row" data-child-id="{{ child.id }}">
+              <span class="child-name"
+                    contenteditable="true"
+                    spellcheck="false"
+                    title="Sub-skill name">{{ child.name }}</span>
+              <textarea class="child-desc"
+                        rows="1"
+                        title="Sub-skill description">{{ child.description }}</textarea>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="card-footer">
+          {% if node.children %}
+          <button class="save-btn" onclick="saveComposite('{{ node.id }}', this)">Save edits</button>
+          {% else %}
+          <button class="save-btn" onclick="saveNode('{{ node.id }}', this)">Save edits</button>
+          {% endif %}
+          {% if node.input_schema %}
+          <span style="font-size:10px;color:var(--text-tertiary);font-weight:500">I/O schema defined</span>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    </div><!-- /tab-nodes -->
+
+    <!-- ── Implementation review tab ──────────────────────────────────────── -->
+    <div class="tab-pane {% if status.startswith('awaiting_impl_review') %}active{% endif %}" id="tab-impl">
+
+      {% if status.startswith("awaiting_impl_review") %}
+      <div class="review-banner impl-banner">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M8 5v4M8 11v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        Implementation ready for review. Approve to compile, or reject to retry the whole layer.
+      </div>
+      {% endif %}
+
+      <div class="impl-grid" id="impl-grid">
+        <div class="impl-empty" id="impl-loading">Loading implementation…</div>
+      </div>
+
+    </div><!-- /tab-impl -->
+
+    <div class="tab-pane {% if status in ('done','compiling') %}active{% endif %}" id="tab-tree">
+      <div class="tree-container" id="tree-root">
+        <div style="color:var(--text-tertiary);font-size:13px;padding:12px 0;">Loading tree…</div>
+      </div>
+    </div><!-- /tab-tree -->
+
+    <!-- ── Sandbox panel ──────────────────────────────────────────────── -->
+    <div class="tab-pane" id="tab-sandbox">
+      {% if status != "done" %}
+      <div class="sandbox-placeholder">
+        Sandbox is available after compilation completes.
+      </div>
+      {% else %}
+      <!-- CTA (idle) -->
+      <div id="sandbox-cta" class="sandbox-cta">
+        <div class="sandbox-cta-title">Run in Sandbox</div>
+        <div class="sandbox-cta-desc">
+          Install the generated agent's dependencies and launch the
+          <strong>Google ADK web UI</strong> — a live chat interface
+          with real-time event tracing.
+        </div>
+        <button class="btn-sandbox-start" id="btn-sandbox-start" onclick="startSandbox()">
+          ▶&nbsp; Run in Sandbox
+        </button>
+      </div>
+
+      <!-- Log panel (shown while setting_up / ready / error) -->
+      <div id="sandbox-log-area" style="display:none">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:12px;">
+          <div id="sandbox-status-badge" class="status-pill idle">
+            <div class="dot"></div>
+            <span id="sandbox-status-label">idle</span>
+          </div>
+          <button class="btn-sandbox-stop" onclick="stopSandbox()">■ Stop</button>
+        </div>
+
+        <!-- Ready banner (hidden until ready) -->
+        <div id="sandbox-ready-banner" class="sandbox-ready-header" style="display:none">
+          <span>✓ Agent chat ready</span>
+          <a id="sandbox-open-link"
+             href="/chat/{{ tree.project_name if tree else '' }}"
+             target="_blank" class="btn-open-chat">
+            Open Chat →
+          </a>
+        </div>
+
+        <div class="sandbox-log-wrap">
+          <div class="sandbox-log-header">
+            <span class="sandbox-log-title">Setup log</span>
+          </div>
+          <pre class="sandbox-log" id="sandbox-log"></pre>
+        </div>
+      </div>
+      {% endif %}
+    </div><!-- /tab-sandbox -->
+
+  </main>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+// ── State ───────────────────────────────────────────────────────────────────
+let currentStatus = {{ status | tojson }};
+let currentLayer  = {{ current_layer | int }};
+let autoRefreshTimer = null;
+
+// ── Status pill rendering ────────────────────────────────────────────────────
+function renderStatusPill(status) {
+  const pill  = document.getElementById('status-pill');
+  const label = document.getElementById('status-label');
+  if (!pill) return;
+
+  pill.classList.remove('processing', 'review', 'done', 'idle');
+
+  if (status === 'done') {
+    pill.classList.add('done');
+  } else if (status.startsWith('awaiting_review') || status.startsWith('awaiting_impl_review')) {
+    pill.classList.add('review');
+  } else if (status === 'idle') {
+    pill.classList.add('idle');
+  } else {
+    pill.classList.add('processing');
+  }
+
+  label.textContent = status.replace(/_/g, ' ');
+}
+
+// Run on load
+renderStatusPill(currentStatus);
+
+// ── Actions ──────────────────────────────────────────────────────────────────
+async function doApprove(btn) {
+  btn.disabled = true;
+  document.getElementById('btn-rollback').disabled = true;
+  try {
+    const r = await fetch('/approve', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      toast(d.detail, 'error');
+      btn.disabled = false;
+      document.getElementById('btn-rollback').disabled = false;
+      return;
+    }
+    toast('Layer approved — advancing…', 'success');
+    setTimeout(() => location.reload(), 900);
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    document.getElementById('btn-rollback').disabled = false;
+  }
+}
+
+async function doRollback(btn) {
+  if (!confirm(`Roll back layer ${currentLayer}? All decompositions for this layer will be discarded.`)) return;
+  btn.disabled = true;
+  document.getElementById('btn-approve').disabled = true;
+  try {
+    const r = await fetch('/rollback', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      toast(d.detail, 'error');
+      btn.disabled = false;
+      document.getElementById('btn-approve').disabled = false;
+      return;
+    }
+    toast('Rolling back…', 'info');
+    setTimeout(() => location.reload(), 900);
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    document.getElementById('btn-approve').disabled = false;
+  }
+}
+
+// ── Node editing ─────────────────────────────────────────────────────────────
+async function saveNode(nodeId, btn) {
+  const nameEl = document.querySelector(`[data-node-id="${nodeId}"][data-field="name"]`);
+  const descEl = document.querySelector(`[data-node-id="${nodeId}"][data-field="description"]`);
+  const payload = {
+    name: nameEl ? nameEl.innerText.trim() : undefined,
+    description: descEl ? descEl.value.trim() : undefined,
+  };
+
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch(`/edit/${nodeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (r.ok) {
+      btn.classList.add('saved');
+      btn.textContent = 'Saved ✓';
+      setTimeout(() => {
+        btn.classList.remove('saved');
+        btn.textContent = 'Save edits';
+        btn.disabled = false;
+      }, 2000);
+    } else {
+      const d = await r.json().catch(() => ({ detail: 'Save failed' }));
+      toast(d.detail, 'error');
+      btn.textContent = 'Save edits';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.textContent = 'Save edits';
+    btn.disabled = false;
+  }
+}
+
+// ── Composite node editing (HITL-1) ──────────────────────────────────────────
+async function saveComposite(nodeId, btn) {
+  const descEl = document.querySelector(`[data-node-id="${nodeId}"][data-field="description"]`);
+  const container = document.getElementById('children-' + nodeId);
+
+  const children = [];
+  if (container) {
+    container.querySelectorAll('.child-edit-row').forEach(row => {
+      const childId = row.dataset.childId;
+      const nameEl = row.querySelector('.child-name');
+      const descEl = row.querySelector('.child-desc');
+      children.push({
+        id: childId,
+        name: nameEl ? nameEl.innerText.trim() : undefined,
+        description: descEl ? descEl.value.trim() : undefined,
+      });
+    });
+  }
+
+  if (children.length < 2) {
+    toast('A composite node must have at least 2 sub-skills.', 'error');
+    return;
+  }
+
+  const payload = {
+    description: descEl ? descEl.value.trim() : undefined,
+    children,
+  };
+
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch(`/edit_children/${nodeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (r.ok) {
+      btn.classList.add('saved');
+      btn.textContent = 'Saved ✓';
+      setTimeout(() => {
+        btn.classList.remove('saved');
+        btn.textContent = 'Save edits';
+        btn.disabled = false;
+      }, 2000);
+    } else {
+      const d = await r.json().catch(() => ({ detail: 'Save failed' }));
+      toast(d.detail, 'error');
+      btn.textContent = 'Save edits';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.textContent = 'Save edits';
+    btn.disabled = false;
+  }
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => el.classList.add('show'));
+  });
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 250);
+  }, 3500);
+}
+
+// ── Auto-refresh when pipeline is processing ─────────────────────────────────
+{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and status != "done" %}
+autoRefreshTimer = setTimeout(() => location.reload(), 3500);
+{% endif %}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  const btn = document.getElementById('tab-' + tab + '-btn');
+  if (btn) btn.classList.add('active');
+  if (tab === 'tree') loadTree();
+}
+
+// ── Tree visualization ────────────────────────────────────────────────────────
+// Tracks which node id is expanded per depth level (accordion: 1 open per layer)
+const openByDepth = {};
+
+function loadTree() {
+  fetch('/tree')
+    .then(r => r.json())
+    .then(data => {
+      const container = document.getElementById('tree-root');
+      if (!data || !data.root) {
+        container.innerHTML = '<div style="color:var(--text-tertiary);font-size:13px;padding:12px 0;">No tree data yet.</div>';
+        return;
+      }
+      container.innerHTML = '';
+      container.appendChild(renderTreeNode(data.root, 0));
+    })
+    .catch(() => {
+      document.getElementById('tree-root').innerHTML =
+        '<div style="color:var(--red);font-size:13px;padding:12px 0;">Failed to load tree.</div>';
+    });
+}
+
+function renderTreeNode(node, depth) {
+  const isComposite = node.node_type === 'composite' && node.children && node.children.length > 0;
+  const isOpen = openByDepth[depth] === node.id;
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tree-node';
+  wrapper.dataset.nodeId = node.id;
+  wrapper.dataset.depth = depth;
+
+  const row = document.createElement('div');
+  row.className = 'tree-row' + (isComposite ? ' composite' : '');
+
+  // Toggle arrow
+  const toggle = document.createElement('span');
+  toggle.className = 'tree-toggle' + (isComposite ? (isOpen ? ' open' : '') : ' leaf');
+  toggle.innerHTML = '&#9654;';
+  row.appendChild(toggle);
+
+  // Type badge
+  const badge = document.createElement('span');
+  badge.className = 'tree-node-badge ' + (node.node_type || 'unknown');
+  badge.textContent = node.node_type || 'unknown';
+  row.appendChild(badge);
+
+  // Exec type badge
+  if (node.exec_type) {
+    const execBadge = document.createElement('span');
+    execBadge.className = 'tree-exec-badge';
+    execBadge.textContent = node.exec_type.replace(/_/g, ' ').toLowerCase();
+    row.appendChild(execBadge);
+  }
+
+  // Name
+  const name = document.createElement('span');
+  name.className = 'tree-name';
+  name.textContent = node.name;
+  row.appendChild(name);
+
+  // Description (truncated)
+  if (node.description) {
+    const desc = document.createElement('span');
+    desc.className = 'tree-desc';
+    desc.title = node.description;
+    desc.textContent = node.description;
+    row.appendChild(desc);
+  }
+
+  wrapper.appendChild(row);
+
+  // Children container
+  if (isComposite) {
+    const childrenEl = document.createElement('div');
+    childrenEl.className = 'tree-children' + (isOpen ? ' open' : '');
+
+    for (const child of node.children) {
+      childrenEl.appendChild(renderTreeNode(child, depth + 1));
+    }
+    wrapper.appendChild(childrenEl);
+
+    row.addEventListener('click', () => {
+      const alreadyOpen = openByDepth[depth] === node.id;
+
+      // Close any open node at this depth
+      if (openByDepth[depth]) {
+        const prev = document.querySelector(`.tree-node[data-node-id="${openByDepth[depth]}"][data-depth="${depth}"]`);
+        if (prev) {
+          prev.querySelector('.tree-children').classList.remove('open');
+          prev.querySelector('.tree-toggle').classList.remove('open');
+        }
+        delete openByDepth[depth];
+      }
+
+      if (!alreadyOpen) {
+        openByDepth[depth] = node.id;
+        childrenEl.classList.add('open');
+        toggle.classList.add('open');
+      }
+    });
+  }
+
+  return wrapper;
+}
+
+// Auto-load tree if tree tab is active on page load
+{% if status in ("done", "compiling") %}
+if (document.getElementById('tab-tree') && document.getElementById('tab-tree').classList.contains('active')) {
+  loadTree();
+}
+{% endif %}
+
+// ── Sandbox ───────────────────────────────────────────────────────────────────
+let sandboxSSE = null;
+
+function sandboxLog(line) {
+  const pre = document.getElementById('sandbox-log');
+  if (!pre) return;
+  const span = document.createElement('span');
+  if (line.startsWith('✓') || line.startsWith('▶')) {
+    span.className = 'log-ok';
+  } else if (line.startsWith('✗') || line.toLowerCase().includes('error') || line.toLowerCase().includes('failed')) {
+    span.className = 'log-err';
+  } else {
+    span.className = 'log-info';
+  }
+  span.textContent = line + '\n';
+  pre.appendChild(span);
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function renderSandboxStatus(status) {
+  const badge = document.getElementById('sandbox-status-badge');
+  const label = document.getElementById('sandbox-status-label');
+  if (!badge || !label) return;
+  badge.className = 'status-pill';
+  if (status === 'ready') badge.classList.add('done');
+  else if (status === 'setting_up') badge.classList.add('processing');
+  else if (status === 'error') badge.classList.add('idle');
+  else badge.classList.add('idle');
+  label.textContent = status.replace(/_/g, ' ');
+}
+
+async function startSandbox() {
+  const cta = document.getElementById('sandbox-cta');
+  const logArea = document.getElementById('sandbox-log-area');
+  if (cta) cta.style.display = 'none';
+  if (logArea) logArea.style.display = 'block';
+
+  renderSandboxStatus('setting_up');
+  document.getElementById('sandbox-log').textContent = '';
+  document.getElementById('sandbox-ready-banner').style.display = 'none';
+
+  try {
+    const r = await fetch('/sandbox/start', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      sandboxLog('✗ ' + (d.detail || 'Failed to start sandbox'));
+      renderSandboxStatus('error');
+      return;
+    }
+    const { port } = await r.json();
+    openSandboxSSE(port);
+  } catch (err) {
+    sandboxLog('✗ ' + err.message);
+    renderSandboxStatus('error');
+  }
+}
+
+function openSandboxSSE(port) {
+  if (sandboxSSE) { sandboxSSE.close(); sandboxSSE = null; }
+
+  sandboxSSE = new EventSource('/sandbox/logs');
+
+  sandboxSSE.onmessage = (e) => {
+    const line = e.data;
+    sandboxLog(line);
+
+    if (line.includes('Agent chat ready')) {
+      renderSandboxStatus('ready');
+      const banner = document.getElementById('sandbox-ready-banner');
+      if (banner) banner.style.display = 'flex';
+      // Keep SSE stream open to show runtime logs
+    } else if (line.startsWith('✗') || (line.includes('failed') && !line.includes('▶'))) {
+      renderSandboxStatus('error');
+      // Keep stream open to show full error context
+    }
+  };
+
+  sandboxSSE.onerror = () => {
+    if (sandboxSSE) { sandboxSSE.close(); sandboxSSE = null; }
+  };
+}
+
+async function stopSandbox() {
+  if (sandboxSSE) { sandboxSSE.close(); sandboxSSE = null; }
+  await fetch('/sandbox/stop', { method: 'POST' });
+  const cta = document.getElementById('sandbox-cta');
+  const logArea = document.getElementById('sandbox-log-area');
+  if (cta) cta.style.display = 'flex';
+  if (logArea) logArea.style.display = 'none';
+  renderSandboxStatus('idle');
+}
+
+// Resume sandbox polling if we navigate to sandbox tab while it was already running
+async function checkSandboxOnTabSwitch() {
+  try {
+    const r = await fetch('/sandbox/status');
+    if (!r.ok) return;
+    const { status, port } = await r.json();
+    if (status === 'idle') return;
+    const cta = document.getElementById('sandbox-cta');
+    const logArea = document.getElementById('sandbox-log-area');
+    if (cta) cta.style.display = 'none';
+    if (logArea) logArea.style.display = 'block';
+    renderSandboxStatus(status);
+    if (status === 'setting_up') {
+      openSandboxSSE(port);
+    } else if (status === 'ready') {
+      const banner = document.getElementById('sandbox-ready-banner');
+      if (banner) banner.style.display = 'flex';
+      // Replay existing logs via SSE (they will replay from offset 0)
+      openSandboxSSE(port);
+    }
+  } catch {}
+}
+
+// Patch switchTab to check sandbox state and load impl data
+const _switchTabBase = switchTab;
+switchTab = function(tab) {
+  _switchTabBase(tab);
+  if (tab === 'sandbox') checkSandboxOnTabSwitch();
+  if (tab === 'impl') loadImplReview();
+};
+
+// ── Implementation review actions ─────────────────────────────────────────────
+async function doApproveImpl(btn) {
+  btn.disabled = true;
+  document.getElementById('btn-rollback-impl').disabled = true;
+  try {
+    const r = await fetch('/approve_impl', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      toast(d.detail, 'error');
+      btn.disabled = false;
+      document.getElementById('btn-rollback-impl').disabled = false;
+      return;
+    }
+    toast('Implementation approved — compiling…', 'success');
+    setTimeout(() => location.reload(), 900);
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    document.getElementById('btn-rollback-impl').disabled = false;
+  }
+}
+
+async function doRollbackImpl(btn) {
+  if (!confirm('Reject this implementation? The entire layer will be re-decomposed and re-implemented.')) return;
+  btn.disabled = true;
+  document.getElementById('btn-approve-impl').disabled = true;
+  try {
+    const r = await fetch('/rollback_impl', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      toast(d.detail, 'error');
+      btn.disabled = false;
+      document.getElementById('btn-approve-impl').disabled = false;
+      return;
+    }
+    toast('Rejected — retrying layer…', 'info');
+    setTimeout(() => location.reload(), 900);
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+    document.getElementById('btn-approve-impl').disabled = false;
+  }
+}
+
+// ── Implementation review loader ──────────────────────────────────────────────
+let implLoaded = false;
+
+async function loadImplReview() {
+  if (implLoaded) return;
+  const grid = document.getElementById('impl-grid');
+  const loading = document.getElementById('impl-loading');
+  if (!grid) return;
+
+  try {
+    const r = await fetch('/tree');
+    if (!r.ok) throw new Error('Failed to fetch tree');
+    const data = await r.json();
+    if (!data || !data.root) {
+      grid.innerHTML = '<div class="impl-empty">No tree data available.</div>';
+      return;
+    }
+
+    // Collect all atomic nodes from the full tree
+    const atomics = [];
+    function collectAtomics(node) {
+      if (node.node_type === 'atomic') atomics.push(node);
+      if (node.children) node.children.forEach(collectAtomics);
+    }
+    collectAtomics(data.root);
+
+    if (atomics.length === 0) {
+      grid.innerHTML = '<div class="impl-empty">No atomic nodes found.</div>';
+      return;
+    }
+
+    grid.innerHTML = '';
+    implLoaded = true;
+
+    for (const node of atomics) {
+      grid.appendChild(buildImplCard(node));
+    }
+  } catch (err) {
+    if (loading) loading.textContent = 'Error: ' + err.message;
+  }
+}
+
+function buildImplCard(node) {
+  const card = document.createElement('div');
+  card.className = 'impl-card';
+  card.dataset.nodeId = node.id;
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'impl-card-header';
+  header.innerHTML = `
+    <span class="type-badge atomic" style="font-size:9px;padding:2px 7px">atomic</span>
+    ${node.exec_type ? `<span class="exec-badge" style="font-size:10px">${node.exec_type.replace(/_/g,' ').toLowerCase()}</span>` : ''}
+    <span style="font-size:13px;font-weight:600;flex:1;letter-spacing:-0.02em">${esc(node.name)}</span>
+  `;
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'impl-card-body';
+
+  // Editable description
+  const descSec = document.createElement('div');
+  descSec.innerHTML = '<div class="impl-subsection-label">Description</div>';
+  const descTA = document.createElement('textarea');
+  descTA.className = 'impl-editable-field';
+  descTA.dataset.implField = 'description';
+  descTA.rows = 2;
+  descTA.value = node.description || '';
+  descSec.appendChild(descTA);
+  body.appendChild(descSec);
+
+  // I/O schemas (editable JSON)
+  const schemasRow = document.createElement('div');
+  schemasRow.className = 'schema-row';
+
+  if (node.input_schema !== undefined && node.input_schema !== null) {
+    const box = document.createElement('div');
+    box.className = 'schema-box';
+    box.innerHTML = '<div class="impl-subsection-label">Input schema (JSON)</div>';
+    const ta = document.createElement('textarea');
+    ta.className = 'impl-editable-field';
+    ta.dataset.implField = 'input_schema';
+    ta.rows = 6;
+    ta.value = JSON.stringify(node.input_schema, null, 2);
+    box.appendChild(ta);
+    schemasRow.appendChild(box);
+  }
+
+  if (node.output_schema !== undefined && node.output_schema !== null) {
+    const box = document.createElement('div');
+    box.className = 'schema-box';
+    box.innerHTML = '<div class="impl-subsection-label">Output schema (JSON)</div>';
+    const ta = document.createElement('textarea');
+    ta.className = 'impl-editable-field';
+    ta.dataset.implField = 'output_schema';
+    ta.rows = 6;
+    ta.value = JSON.stringify(node.output_schema, null, 2);
+    box.appendChild(ta);
+    schemasRow.appendChild(box);
+  }
+
+  if (schemasRow.children.length > 0) body.appendChild(schemasRow);
+
+  // Session state wiring (read-only pills)
+  if ((node.state_reads && node.state_reads.length) || (node.state_writes && node.state_writes.length)) {
+    const sec = document.createElement('div');
+    sec.innerHTML = '<div class="impl-subsection-label">Session state</div>';
+    const pills = document.createElement('div');
+    pills.className = 'state-pills';
+    (node.state_reads || []).forEach(k => {
+      const p = document.createElement('span');
+      p.className = 'state-pill read';
+      p.textContent = '← ' + k;
+      p.title = 'reads from session state';
+      pills.appendChild(p);
+    });
+    (node.state_writes || []).forEach(k => {
+      const p = document.createElement('span');
+      p.className = 'state-pill write';
+      p.textContent = '→ ' + k;
+      p.title = 'writes to session state';
+      pills.appendChild(p);
+    });
+    sec.appendChild(pills);
+    body.appendChild(sec);
+  }
+
+  // LLM instruction (editable)
+  if (node.exec_type === 'LLM_PROMPT') {
+    const sec = document.createElement('div');
+    sec.innerHTML = '<div class="impl-subsection-label">System prompt / instruction</div>';
+    const ta = document.createElement('textarea');
+    ta.className = 'impl-editable-field';
+    ta.dataset.implField = 'instruction';
+    ta.rows = 8;
+    ta.value = node.instruction || '';
+    sec.appendChild(ta);
+    body.appendChild(sec);
+  }
+
+  // Tool implementation (editable code)
+  if (node.exec_type !== 'LLM_PROMPT') {
+    const sec = document.createElement('div');
+    sec.innerHTML = '<div class="impl-subsection-label">Implementation (function body, 4-space indent)</div>';
+    const ta = document.createElement('textarea');
+    ta.className = 'impl-editable-code';
+    ta.dataset.implField = 'implementation';
+    ta.rows = 14;
+    ta.value = node.implementation || '';
+    ta.spellcheck = false;
+    sec.appendChild(ta);
+    body.appendChild(sec);
+  }
+
+  // Save button
+  const footer = document.createElement('div');
+  footer.style.cssText = 'display:flex;justify-content:flex-end;';
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'impl-save-btn';
+  saveBtn.textContent = 'Save edits';
+  saveBtn.onclick = () => saveImplNode(node.id, saveBtn, body);
+  footer.appendChild(saveBtn);
+  body.appendChild(footer);
+
+  card.appendChild(body);
+  return card;
+}
+
+async function saveImplNode(nodeId, btn, bodyEl) {
+  const payload = {};
+
+  bodyEl.querySelectorAll('[data-impl-field]').forEach(el => {
+    const field = el.dataset.implField;
+    const val = el.value.trim();
+    if (field === 'input_schema' || field === 'output_schema') {
+      try {
+        payload[field] = JSON.parse(val);
+      } catch {
+        toast(`Invalid JSON in ${field.replace('_', ' ')}`, 'error');
+        throw new Error('json_parse');
+      }
+    } else {
+      payload[field] = val || null;
+    }
+  });
+
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch(`/edit_impl/${nodeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (r.ok) {
+      btn.classList.add('saved');
+      btn.textContent = 'Saved ✓';
+      setTimeout(() => {
+        btn.classList.remove('saved');
+        btn.textContent = 'Save edits';
+        btn.disabled = false;
+      }, 2000);
+    } else {
+      const d = await r.json().catch(() => ({ detail: 'Save failed' }));
+      toast(d.detail, 'error');
+      btn.textContent = 'Save edits';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    if (err.message !== 'json_parse') toast(err.message, 'error');
+    btn.textContent = 'Save edits';
+    btn.disabled = false;
+  }
+}
+
+function buildFullFn(node) {
+  const props = (node.input_schema && node.input_schema.properties) ? node.input_schema.properties : {};
+  const params = Object.entries(props).map(([k]) => k).join(', ');
+  return `def _${node.name}_impl(${params}) -> dict:\n${node.implementation}`;
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Auto-load impl tab if it starts active
+{% if status.startswith("awaiting_impl_review") %}
+loadImplReview();
+{% endif %}
+</script>
+
+</body>
+</html>

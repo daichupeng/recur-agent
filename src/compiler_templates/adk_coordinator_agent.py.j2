@@ -1,0 +1,25 @@
+"""{{ node.name }} — LLM coordinator."""
+from google.adk.agents import LlmAgent
+{%- for imp in child_imports %}
+from {{ imp.module }} import {{ imp.symbol }}
+{%- endfor %}
+
+{{ node.name }}_agent = LlmAgent(
+    name="{{ node.name }}",
+    model="gemini-2.0-flash",
+    description="{{ node.description }}",
+    instruction="""{{ node.description }}
+
+Route to the most appropriate sub-agent based on the current context:
+{%- for imp in child_imports %}
+- {{ imp.symbol }}: {{ imp.description }}
+{%- endfor %}
+
+Invoke exactly one sub-agent per turn. Pass relevant context from session state.
+""",
+    sub_agents=[
+{%- for imp in child_imports %}
+        {{ imp.symbol }},
+{%- endfor %}
+    ],
+)

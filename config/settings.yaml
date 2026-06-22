@@ -1,0 +1,10 @@
+anthropic:
+  model: claude-opus-4-8
+  max_tokens: 8192
+  effort: high
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+output_dir: ./output

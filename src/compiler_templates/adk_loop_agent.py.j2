@@ -1,0 +1,16 @@
+"""{{ node.name }} — loop orchestrator."""
+from google.adk.agents import LoopAgent
+{%- for imp in child_imports %}
+from {{ imp.module }} import {{ imp.symbol }}
+{%- endfor %}
+
+# max_iterations: sub-agent must call actions.escalate() to terminate early.
+{{ node.name }}_agent = LoopAgent(
+    name="{{ node.name }}",
+    max_iterations=10,
+    sub_agents=[
+{%- for imp in child_imports %}
+        {{ imp.symbol }},
+{%- endfor %}
+    ],
+)

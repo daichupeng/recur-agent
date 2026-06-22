@@ -1,0 +1,20 @@
+# System prompts for each platform agent.
+# These are kept stable to maximise Anthropic prompt-cache hit rates.
+# Loaded once at startup; do NOT add dynamic content here.
+
+decomposer:
+  description: >
+    Classifies skill nodes as COMPOSITE or ATOMIC based on the three atomic
+    execution patterns (DETERMINISTIC_CODE, EXTERNAL_API, LLM_PROMPT) and
+    drafts immediate sub-skills for composite nodes.
+
+schema_architect:
+  description: >
+    Defines static JSON Schema I/O interfaces for approved atomic skill nodes.
+    Ensures all inputs/outputs are strict data types with no ambiguous state objects.
+
+compiler:
+  description: >
+    Ingests the fully-hydrated skill tree and emits a complete Google ADK project:
+    @tool stubs for DETERMINISTIC_CODE and EXTERNAL_API atomics,
+    LlmAgent definitions for LLM_PROMPT atomics, and a root Agent orchestrator.

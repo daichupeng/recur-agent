@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  recur-agent:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8080:8000"
+      - "7860:7860"
+    command: uv run -- python main.py --web
+    restart: "no"
+    volumes:
+      - ./output:/app/output
