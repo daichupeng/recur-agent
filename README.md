@@ -20,9 +20,9 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         |
         | <------------------------------ OUTER LOOP (while True) ---------------------------------+
         v                                                                                          |
-  get nodes at current_layer depth                                                                |
+  get nodes at current_layer depth                                                                 |
         |                                                                                          |
-        +-- all ATOMIC? --> any nodes at layer+1? --no--> EXIT LOOP (all layers done)             |
+        +-- all ATOMIC? --> any nodes at layer+1? --no--> EXIT LOOP (all layers done)              |
         |                          |                                                               |
         |                         yes                                                              |
         |                          v                                                               |
@@ -126,53 +126,53 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         |
         v
   +------------------------------------------+
-  | Compiler  (Jinja2, no LLM)              |
+  | Compiler  (Jinja2, no LLM)               |
   |  normalise names to snake_case           |
   |  scan impls -> collect third-party deps  |
   |  scan impls -> collect required env vars |
   |  copy root .env -> project dir           |
-  |  depth-first recursive walk:            |
+  |  depth-first recursive walk:             |
   |                                          |
   |  ATOMIC -> LLM_PROMPT                    |
-  |    adk_llm_agent_stub.py.j2             |
-  |    -> atomics/{name}.py  (LlmAgent)     |
+  |    adk_llm_agent_stub.py.j2              |
+  |    -> atomics/{name}.py  (LlmAgent)      |
   |                                          |
-  |  ATOMIC -> DETERMINISTIC_CODE /         |
-  |            EXTERNAL_API                 |
-  |    adk_tool_stub.py.j2                  |
-  |    -> atomics/{name}.py                 |
-  |       (FunctionTool + LlmAgent wrapper) |
+  |  ATOMIC -> DETERMINISTIC_CODE /          |
+  |            EXTERNAL_API                  |
+  |    adk_tool_stub.py.j2                   |
+  |    -> atomics/{name}.py                  |
+  |       (FunctionTool + LlmAgent wrapper)  |
   |                                          |
-  |  COMPOSITE -> SEQUENTIAL                |
-  |    -> orchestrators/{name}.py           |
-  |       (SequentialAgent)                 |
+  |  COMPOSITE -> SEQUENTIAL                 |
+  |    -> orchestrators/{name}.py            |
+  |       (SequentialAgent)                  |
   |                                          |
-  |  COMPOSITE -> PARALLEL                  |
-  |    -> orchestrators/{name}.py           |
-  |       (ParallelAgent)                   |
+  |  COMPOSITE -> PARALLEL                   |
+  |    -> orchestrators/{name}.py            |
+  |       (ParallelAgent)                    |
   |                                          |
-  |  COMPOSITE -> LOOP                      |
-  |    -> orchestrators/{name}.py           |
-  |       (LoopAgent, max_iterations=10)    |
+  |  COMPOSITE -> LOOP                       |
+  |    -> orchestrators/{name}.py            |
+  |       (LoopAgent, max_iterations=10)     |
   |                                          |
-  |  COMPOSITE -> LLM_COORDINATOR           |
-  |    -> orchestrators/{name}.py           |
-  |       (LlmAgent with routing prompt)    |
+  |  COMPOSITE -> LLM_COORDINATOR            |
+  |    -> orchestrators/{name}.py            |
+  |       (LlmAgent with routing prompt)     |
   |                                          |
-  |  root -> run.py (interactive CLI)       |
-  |  root -> agent.py (adk web entry point) |
+  |  root -> run.py (interactive CLI)        |
+  |  root -> agent.py (adk web entry point)  |
   +------------------------------------------+
         |
         v
   +------------------------------------------+    import     +--------------------+
-  | Verify-and-Repair  (subprocess, up to x3)|   passes  -> | output/            |
-  |  python -c "import run"                  |              | {project_name}/    |
-  |  on failure:                             |              | (ADK project)      |
-  |    parse traceback -> atomics/{x}.py     |              +--------------------+
+  | Verify-and-Repair  (subprocess, up to x3)|   passes  -> | output/             |
+  |  python -c "import run"                  |              | {project_name}/     |
+  |  on failure:                             |              | (ADK project)       |
+  |    parse traceback -> atomics/{x}.py     |              +---------------------+
   |    clear node.implementation             |
   |    re-call Tool Implementor (that node)  |
   |    rewrite file -> retry import          |
-  |  after x3 failures: surface in UI status|
+  |  after x3 failures: surface in UI status |
   +------------------------------------------+
 ```
 
