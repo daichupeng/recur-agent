@@ -5,8 +5,10 @@ DO NOT edit manually; re-run the recur-agent compiler to regenerate.
 """
 import asyncio
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from google.adk.runners import InMemoryRunner
-from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 
 from {{ root_module }} import {{ root_symbol }} as root_agent
@@ -16,15 +18,13 @@ USER_ID = "user"
 
 
 async def _interactive_loop() -> None:
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(
-        app_name=APP_NAME,
-        user_id=USER_ID,
-    )
     runner = InMemoryRunner(
         agent=root_agent,
         app_name=APP_NAME,
-        session_service=session_service,
+    )
+    session = await runner.session_service.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
     )
 
     print(f"{{ project_name }} agent running. Type 'exit' to quit.\n")

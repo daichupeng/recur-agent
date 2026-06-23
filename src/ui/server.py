@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -15,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from src.orchestrator.pipeline import PipelineEvents, RedecomposeRequest
-from src.orchestrator.state import SkillNode
+from src.orchestrator.state import SkillNode, SkillTree
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -67,6 +70,14 @@ async def _run_sandbox(project_path: Path, port: int) -> None:
     _sandbox["notify"] = asyncio.Event()
 
     _sandbox_log(f"▶ Setting up sandbox for {project_path.name}…")
+
+    # Remove any existing .venv (may have been created on a different OS/arch).
+    # Use subprocess rm -rf instead of shutil.rmtree because broken symlinks
+    # inside the venv cause rmtree to fail silently on Linux, leaving a corrupt
+    # directory that makes `uv sync` error with "not a valid Python environment".
+    venv_dir = project_path / ".venv"
+    if venv_dir.exists() or venv_dir.is_symlink():
+        await _stream_subprocess(["rm", "-rf", str(venv_dir)], project_path)
 
     # Install generated project dependencies
     _sandbox_log("▶ Running: uv sync")
@@ -311,6 +322,67 @@ async def rollback_impl() -> dict:
 # ── Sandbox endpoints ───────────────────────────────────────────────────────
 
 
+class SandboxEnvPayload(BaseModel):
+    env_vars: dict[str, str]
+
+
+@app.post("/sandbox/env")
+async def sandbox_set_env(payload: SandboxEnvPayload) -> dict:
+    """Write key-value pairs into the compiled project's .env before sandbox launch.
+
+    Values are written to disk only and are never returned after submission.
+    """
+    project_path = _resolve_sandbox_project()
+    if project_path is None:
+        raise HTTPException(status_code=404, detail="No compiled project found.")
+    if not payload.env_vars:
+        return {"ok": True, "written": 0}
+
+    env_file = project_path / ".env"
+    existing: dict[str, str] = {}
+    if env_file.exists():
+        for raw_line in env_file.read_text().splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                existing[k.strip()] = v.strip()
+
+    existing.update(payload.env_vars)
+    lines = [f'{k}={v}' for k, v in existing.items()]
+    env_file.write_text("\n".join(lines) + "\n")
+    logger.info("Wrote %d env vars to %s", len(payload.env_vars), env_file)
+    return {"ok": True, "written": len(payload.env_vars)}
+
+
+@app.get("/sandbox/required_env")
+async def sandbox_required_env() -> dict:
+    """Return the list of env var names required by the compiled project."""
+    if _events is None or _events.current_tree is None:
+        return {"required": []}
+    tree = _events.current_tree
+    required = tree.required_env_vars if hasattr(tree, "required_env_vars") else []
+
+    project_path = _resolve_sandbox_project()
+    satisfied: list[str] = []
+    missing: list[str] = []
+    if project_path:
+        env_file = project_path / ".env"
+        present: set[str] = set()
+        if env_file.exists():
+            for raw_line in env_file.read_text().splitlines():
+                line = raw_line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    if v.strip():
+                        present.add(k.strip())
+        for key in required:
+            (satisfied if key in present else missing).append(key)
+    else:
+        missing = list(required)
+
+    return {"required": required, "satisfied": satisfied, "missing": missing}
+
+
 @app.post("/sandbox/start")
 async def sandbox_start() -> dict:
     """Start the sandbox for the current (done) project, or a named existing project."""
@@ -399,6 +471,44 @@ async def list_projects() -> dict:
             if p.is_dir() and (p / "run.py").exists():
                 projects.append({"name": p.name, "path": str(p)})
     return {"projects": projects}
+
+
+@app.get("/project/{project_name}", response_class=HTMLResponse)
+async def project_view(request: Request, project_name: str) -> HTMLResponse:
+    """View a completed project — shows its Layer View / Tree View / Sandbox tabs."""
+    project_path = _get_output_dir() / project_name
+    if not project_path.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+
+    tree_json = project_path / "blueprint_verified.json"
+    if not tree_json.exists():
+        raise HTTPException(status_code=404, detail="No blueprint found for this project.")
+
+    tree = SkillTree.load_json(tree_json)
+    nodes = tree.get_layer_nodes()
+
+    return templates.TemplateResponse(
+        request,
+        "dashboard.html",
+        {
+            "status": "done",
+            "current_layer": tree.current_layer,
+            "nodes": nodes,
+            "tree": tree,
+            "tree_endpoint": f"/project/{project_name}/tree",
+        },
+    )
+
+
+@app.get("/project/{project_name}/tree")
+async def project_tree(project_name: str) -> dict:
+    """Return the skill tree JSON for a compiled project."""
+    project_path = _get_output_dir() / project_name
+    tree_json = project_path / "blueprint_verified.json"
+    if not tree_json.exists():
+        raise HTTPException(status_code=404, detail="No blueprint found for this project.")
+    tree = SkillTree.load_json(tree_json)
+    return tree.model_dump()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

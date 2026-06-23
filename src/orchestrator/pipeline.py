@@ -156,7 +156,7 @@ async def run_pipeline(
         tool_atomics = [
             n for n in tree.root.topological_order()
             if n.node_type == NodeType.ATOMIC
-            and n.exec_type in (ExecType.DETERMINISTIC_CODE, ExecType.EXTERNAL_API)
+            and n.exec_type in (ExecType.DETERMINISTIC_CODE, ExecType.EXTERNAL_API, ExecType.OPENSOURCE_LIBRARY)
             and n.implementation is None
         ]
         if tool_atomics:
@@ -167,12 +167,17 @@ async def run_pipeline(
         events.current_tree = tree
 
         # ── STEP 4: HITL-2 (implementation review) ────────────────────────
-        events.status = f"awaiting_impl_review_layer_{tree.current_layer}"
-        events.approve_impl.clear()
-        events.rollback_impl.clear()
-        logger.info("Implementation ready for review at http://127.0.0.1:8000")
+        all_atomics = [n for n in tree.root.topological_order() if n.node_type == NodeType.ATOMIC]
+        if not all_atomics:
+            logger.info("No atomic nodes at layer %d — auto-approving implementation review.", tree.current_layer)
+            impl_approved = True
+        else:
+            events.status = f"awaiting_impl_review_layer_{tree.current_layer}"
+            events.approve_impl.clear()
+            events.rollback_impl.clear()
+            logger.info("Implementation ready for review at http://127.0.0.1:8000")
 
-        impl_approved = await _hitl2(events)
+            impl_approved = await _hitl2(events)
         if not impl_approved:
             # Roll back the whole layer and retry from decompose
             logger.info("Implementation rollback requested for layer %d.", tree.current_layer)

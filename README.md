@@ -25,7 +25,6 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         +-- all ATOMIC? --> any nodes at layer+1? --no--> EXIT LOOP (all layers done)             |
         |                          |                                                               |
         |                         yes                                                              |
-        |                          |                                                               |
         |                          v                                                               |
         |                   current_layer += 1 ------------------------------------------------->+
         |                                                                                          (continue)
@@ -129,6 +128,9 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   +------------------------------------------+
   | Compiler  (Jinja2, no LLM)              |
   |  normalise names to snake_case           |
+  |  scan impls -> collect third-party deps  |
+  |  scan impls -> collect required env vars |
+  |  copy root .env -> project dir           |
   |  depth-first recursive walk:            |
   |                                          |
   |  ATOMIC -> LLM_PROMPT                    |
@@ -158,6 +160,7 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   |       (LlmAgent with routing prompt)    |
   |                                          |
   |  root -> run.py (interactive CLI)       |
+  |  root -> agent.py (adk web entry point) |
   +------------------------------------------+
         |
         v
@@ -197,32 +200,64 @@ Uses the **Anthropic SDK** for internal agents:
 - [src/agents/complexity_reviewer.py](src/agents/complexity_reviewer.py) — flags over-split or structurally odd decompositions
 - [src/agents/schema_architect.py](src/agents/schema_architect.py) — hydrates I/O JSON Schema for every unhydrated atomic in the tree
 - [src/agents/prompt_engineer.py](src/agents/prompt_engineer.py) — writes ADK session-state-aware instructions for LLM_PROMPT nodes
-- [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; uses claude-sonnet-4-6 with syntax validation and retry
-- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; depth-first walk, leaves compiled first
+- [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; prefers domain client libraries over raw HTTP; mandates `os.environ` for credentials; uses claude-sonnet-4-6 with syntax validation and retry
+- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations
 - [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with two HITL checkpoints and per-node re-decompose
-- [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard
+- [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection
 
 ### Generated Output (Google ADK)
 The compiler emits a fully self-contained **Google ADK** project:
 ```
 output/{project_name}/
+├── agent.py                     # adk web entry point (root_agent, sys.path self-injection)
 ├── run.py                       # interactive CLI entrypoint (InMemoryRunner)
-├── pyproject.toml               # google-adk dependency
-├── blueprint_raw.json           # Tree snapshot after each decomposition round
-├── blueprint_verified.json      # Tree after HITL-2 approval (schemas + implementations)
+├── pyproject.toml               # google-adk + auto-detected third-party deps
+├── .env                         # copied from repo root at compile time (always overwritten)
+├── blueprint_raw.json           # tree snapshot after each decomposition round
+├── blueprint_verified.json      # tree after HITL-2 approval (schemas + implementations)
 ├── layers/
 │   └── layer_{N}/
-│       └── blueprint_verified.json   # Per-layer checkpoint
+│       └── blueprint_verified.json   # per-layer checkpoint
 ├── atomics/
 │   ├── __init__.py
-│   ├── {skill_name}.py          # LlmAgent definition (LLM_PROMPT)
-│   └── {skill_name}.py          # FunctionTool + LlmAgent wrapper (DETERMINISTIC_CODE / EXTERNAL_API)
+│   ├── {skill_name}.py          # LlmAgent  (LLM_PROMPT)
+│   └── {skill_name}.py          # def {name}(...) + FunctionTool + LlmAgent wrapper
+│                                #   (DETERMINISTIC_CODE / EXTERNAL_API)
 └── orchestrators/
     ├── __init__.py
     └── {composite_name}.py      # SequentialAgent / ParallelAgent / LoopAgent / LlmAgent (coordinator)
 ```
 
 Every node (atomic or composite) exports a `{name}_agent` symbol. Orchestrators import only their direct children — the tree hierarchy is preserved as a hierarchy of ADK agent wrapping.
+
+---
+
+## Compiler Details
+
+### Dependency auto-detection
+After `ToolImplementorAgent` finishes, the compiler scans every `node.implementation` for
+`import X` / `from X import` statements at function-body indentation. Third-party packages
+(not stdlib, not `google.*`/`dotenv`) are collected and injected into `pyproject.toml` as
+additional dependencies. No manual manifest editing required.
+
+### Required env var detection
+The compiler also scans implementations for `os.environ["KEY_NAME"]` patterns and stores the
+discovered key names on `tree.required_env_vars`. The dashboard uses this list to show a
+credential form before the sandbox can be started.
+
+### FunctionTool registration
+Tool nodes define the implementation function under its **public name** (`def {name}(...)`).
+The `FunctionTool` wrapper is stored in a private `_{name}_tool` variable so that ADK
+registers the tool under the same name the `LlmAgent` instruction tells the model to call.
+
+### Gemini model
+All generated `LlmAgent` instances use `_DEFAULT_GEMINI_MODEL` from `compiler.py`
+(`"gemini-2.0-flash"`). Changing one constant updates every generated project.
+
+### .env propagation
+The root `.env` is **always** copied into the generated project directory at compile time,
+overwriting any stale copy. The generated `agent.py` calls `load_dotenv()` before importing
+the root agent so credentials are available to all `os.environ` lookups at ADK web startup.
 
 ---
 
@@ -251,12 +286,15 @@ For **per-node re-decompose**, the pipeline does not touch the snapshot. Instead
 recur-agent/
 ├── main.py                              # CLI / web entrypoint
 ├── pyproject.toml                       # Platform dependencies
+├── .env                                 # ANTHROPIC_API_KEY, GOOGLE_API_KEY, and any
+│                                        # service keys used by generated projects
 ├── config/
 │   ├── settings.yaml                    # Model, server, output defaults
 │   └── agent_profiles.yaml              # Agent descriptions
 ├── src/
 │   ├── orchestrator/
-│   │   ├── state.py                     # SkillNode, SkillTree, LayerSnapshot, rollback()
+│   │   ├── state.py                     # SkillNode, SkillTree (+ required_env_vars),
+│   │   │                                # LayerSnapshot, rollback()
 │   │   └── pipeline.py                  # Main async loop (snapshot -> decompose ->
 │   │                                    #   complexity-review -> HITL-1 -> schema ->
 │   │                                    #   prompt-engineer -> tool-implement -> HITL-2 ->
@@ -268,25 +306,23 @@ recur-agent/
 │   │   ├── schema_architect.py          # SchemaArchitectAgent (batches of 5)
 │   │   ├── prompt_engineer.py           # PromptEngineerAgent (state_reads / state_writes)
 │   │   ├── tool_implementor.py          # ToolImplementorAgent (sonnet, 1 node/call, syntax retry)
-│   │   └── compiler.py                  # CompilerAgent (Jinja2 tree-recursive walk)
+│   │   └── compiler.py                  # CompilerAgent (Jinja2 tree-recursive walk,
+│   │                                    #   dep scan, env-var scan, .env copy)
 │   ├── ui/
-│   │   ├── server.py                    # FastAPI HITL dashboard
+│   │   ├── server.py                    # FastAPI HITL dashboard + sandbox endpoints
 │   │   └── templates/
 │   │       ├── index.html               # Landing page
-│   │       ├── dashboard.html           # HITL-1 + HITL-2 review UI
+│   │       ├── dashboard.html           # HITL-1 + HITL-2 review UI + credential form
 │   │       └── chat.html                # Embedded chat for testing generated agents
 │   └── compiler_templates/
-│       ├── adk_tool_stub.py.j2          # FunctionTool + LlmAgent wrapper
+│       ├── adk_tool_stub.py.j2          # def {name}() + FunctionTool + LlmAgent wrapper
 │       ├── adk_llm_agent_stub.py.j2     # LlmAgent with instruction + state wiring
 │       ├── adk_sequential_agent.py.j2   # SequentialAgent orchestrator
 │       ├── adk_parallel_agent.py.j2     # ParallelAgent orchestrator
 │       ├── adk_loop_agent.py.j2         # LoopAgent orchestrator (max_iterations=10)
 │       ├── adk_coordinator_agent.py.j2  # LlmAgent coordinator with routing instruction
 │       ├── adk_root_orchestrator.py.j2  # run.py (interactive CLI)
-│       └── adk_pyproject.toml.j2        # Target project manifest
-├── improvement_history/
-│   ├── 20260619_solution.md             # P1/P2 fixes: compiler rewrite, tool implementor, etc.
-│   └── 20260621_solution.md             # P1 fixes: ADK constraints, HITL-2, verify-repair, etc.
+│       └── adk_pyproject.toml.j2        # Target project manifest (auto-deps injected)
 └── output/
     └── {project_name}/                  # Generated ADK project
 ```
@@ -299,7 +335,7 @@ recur-agent/
 
 - Python 3.11+
 - `uv` package manager
-- `ANTHROPIC_API_KEY` environment variable set
+- `ANTHROPIC_API_KEY` and `GOOGLE_API_KEY` in `.env`
 
 ### Install
 
@@ -354,6 +390,40 @@ After schemas, instructions, and function bodies are generated, the pipeline pau
 
 ---
 
+## Sandbox
+
+After compilation completes, the **Sandbox** tab becomes available. It installs the generated
+project's dependencies (`uv sync`) and launches `adk web .` — the Google ADK chat UI — at
+`http://localhost:7860`.
+
+### Credential form
+
+If the generated project requires API keys (detected from `os.environ["KEY_NAME"]` calls in
+the implementation), the dashboard shows a credential form **before** the sandbox can start:
+
+- Keys already present in the project's `.env` appear as `✓ satisfied`.
+- Missing keys are shown as required password inputs.
+- Submitting the form writes the values to `.env` on the server. Values are never echoed
+  back after submission.
+- **"Run in Sandbox" is disabled until all required keys are satisfied.**
+
+Keys you need for your project should be added to the root `.env` before compiling so they
+are copied automatically. For keys only known after compile time, enter them in the
+credential form.
+
+### Sandbox API endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/sandbox/start` | Start the sandbox for the current compiled project |
+| `POST` | `/sandbox/stop` | Terminate the running sandbox |
+| `GET` | `/sandbox/status` | `{status, port, ready_url}` |
+| `GET` | `/sandbox/logs` | SSE stream of setup + adk web stdout |
+| `GET` | `/sandbox/required_env` | `{required, satisfied, missing}` key lists |
+| `POST` | `/sandbox/env` | Write `{env_vars: {KEY: value}}` into the project `.env` |
+
+---
+
 ## Agent Model Selection
 
 | Agent | Model | Rationale |
@@ -366,10 +436,12 @@ After schemas, instructions, and function bodies are generated, the pipeline pau
 
 ---
 
-## MVP Scope
+## Tool Implementation Rules
 
-The MVP focuses on **generation and structural compilation** only:
-- The platform does **not** dynamically execute the generated target code
-- Sandbox wiring (GKE/gVisor) is declared as comments in generated stubs — implementation is post-MVP
-- The skill tree is a **tree** (not a DAG); duplicate atomics across branches are allowed and generate separate stubs
-- `EXTERNAL_API` stubs contain `# CONFIGURE: ...` placeholders for base URLs and API keys that the developer must fill in
+`ToolImplementorAgent` follows this hierarchy for `EXTERNAL_API` nodes:
+
+1. **Use a domain client library** if one exists (e.g. `yfinance`, `stripe`, `twilio`, `boto3`, `newsapi-python`). Import it inside the function body.
+2. **Fall back to `httpx`** only when no stable client exists. Use only documented, stable endpoints — never undocumented internal paths (e.g. paths with `/v7/`, `/v8/` slugs and no public spec).
+3. **Credentials via `os.environ`** — `os.environ["KEY_NAME"]` always. No literal placeholder strings. A missing key raises `KeyError` immediately on first call rather than silently sending wrong auth headers.
+
+For `DETERMINISTIC_CODE` nodes, only Python stdlib is used; all imports are inside the function body.

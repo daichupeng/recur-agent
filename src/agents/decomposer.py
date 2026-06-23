@@ -19,7 +19,8 @@ ATOMIC DEFINITION — a skill is atomic if its core logic can ENTIRELY be execut
 ONE of the following three patterns, with NO further routing, branching, or sub-coordination:
 1. DETERMINISTIC_CODE — purely standard code (SQL query, regex parse, math formula, JSON mapping)
 2. EXTERNAL_API — a single external call (Stripe charge, Slack webhook, weather fetch)
-3. LLM_PROMPT — a single-turn LLM prompt with zero tool-calling loops (sentiment classify,
+3. OPENSOURCE_LIBRARY - a standard code utilizing well-known open-source libraries (pandas, yfinance, scikit-learn, etc.) Used for specialized tasks where specific libraries are good at.
+4. LLM_PROMPT — a single-turn LLM prompt with zero tool-calling loops (sentiment classify,
    schema extraction, single-paragraph summarize)
 
 A skill is COMPOSITE if it requires multiple of the above, orchestration, routing, or
@@ -71,7 +72,7 @@ You MUST respond with a JSON array parallel to the input array — one entry per
 [
   {
     "node_type": "composite" | "atomic",
-    "exec_type": "DETERMINISTIC_CODE" | "EXTERNAL_API" | "LLM_PROMPT" | null,
+    "exec_type": "DETERMINISTIC_CODE" | "EXTERNAL_API" | "LLM_PROMPT" | "OPENSOURCE_LIBRARY" | null,
     "composition_type": "SEQUENTIAL" | "PARALLEL" | "LOOP" | "LLM_COORDINATOR" | null,
     "children": [
       {"name": "...", "description": "..."},
@@ -94,7 +95,7 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
             "node_type": {"type": "string", "enum": ["composite", "atomic"]},
             "exec_type": {
                 "anyOf": [
-                    {"type": "string", "enum": ["DETERMINISTIC_CODE", "EXTERNAL_API", "LLM_PROMPT"]},
+                    {"type": "string", "enum": ["DETERMINISTIC_CODE", "EXTERNAL_API", "LLM_PROMPT", "OPENSOURCE_LIBRARY"]},
                     {"type": "null"},
                 ]
             },

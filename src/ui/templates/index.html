@@ -344,6 +344,24 @@
       letter-spacing: -0.01em;
     }
 
+    .btn-view-project {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 14px;
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--surface);
+      color: var(--text-secondary);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-view-project:hover { border-color: var(--border-strong); color: var(--text-primary); }
+
     .btn-run-project {
       display: inline-flex;
       align-items: center;
@@ -672,9 +690,12 @@ let miniActiveProject = null;
           <div class="project-name">${proj.name}</div>
           <div class="run-status" id="run-status-${proj.name}"></div>
         </div>
-        <button class="btn-run-project" id="btn-run-${proj.name}" onclick="runProject('${proj.name}', this)">
-          ▶ Run
-        </button>
+        <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+          <a class="btn-view-project" href="/project/${proj.name}">View →</a>
+          <button class="btn-run-project" id="btn-run-${proj.name}" onclick="runProject('${proj.name}', this)">
+            ▶ Run
+          </button>
+        </div>
       `;
       list.appendChild(row);
     }

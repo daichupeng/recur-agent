@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 class ExecType(str, Enum):
     DETERMINISTIC_CODE = "DETERMINISTIC_CODE"
     EXTERNAL_API = "EXTERNAL_API"
+    OPENSOURCE_LIBRARY = "OPENSOURCE_LIBRARY"
     LLM_PROMPT = "LLM_PROMPT"
 
 
@@ -88,6 +89,7 @@ class SkillTree(BaseModel):
     root: SkillNode
     current_layer: int = 0
     history: list[LayerSnapshot] = Field(default_factory=list)
+    required_env_vars: list[str] = Field(default_factory=list)
 
     def snapshot_current_layer(self) -> None:
         """Capture the tree state before decomposing current_layer."""

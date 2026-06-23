@@ -29,11 +29,22 @@ Rules:
     but define them as nested functions inside the body (they will be indented under the body).
   - All stdlib imports must be inside the function body, each indented with 4 spaces
     (e.g., `    import re`, `    import json`, `    import datetime`).
+- For OPENSOURCE_LIBRARY:
+  - Implement using well-known open-source libraries (pandas, numpy, yfinance, scikit-learn, etc.).
+  - Import the library inside the function body, indented with 4 spaces.
+  - The body must be correct and self-contained.
 - For EXTERNAL_API:
-  - Use `httpx` (already available) for HTTP calls.
-  - Mark all configurable values (base URL, API key, endpoint path) with a
-    `# CONFIGURE: <what to set>` comment on the same line.
-  - Import httpx inside the function body, indented with 4 spaces: `    import httpx`.
+  - Prefer a well-known Python client library for the target service when one exists
+    (e.g. `yfinance` for Yahoo Finance, `stripe` for Stripe, `twilio` for Twilio,
+    `boto3` for AWS, `newsapi-python` for NewsAPI, `requests` for generic REST).
+    Import it inside the function body.
+  - Only fall back to `httpx` when no stable client library exists. When you do,
+    use only documented, stable API endpoints — never undocumented internal paths
+    (paths containing version slugs like `/v7/`, `/v8/` with no public spec).
+  - For any API key, token, or credential: use `os.environ["KEY_NAME"]` (add
+    `    import os` inside the function body). Never write a literal placeholder
+    string — a missing env var will raise a clear `KeyError` on first call rather
+    than silently sending wrong credentials.
   - Include basic error handling: raise a RuntimeError with a descriptive message on non-2xx status.
 - Every branch must end with a return statement that produces a dict matching the output_schema.
 - Do not add any explanation or markdown — return raw Python code only.
@@ -173,8 +184,8 @@ class ToolImplementorAgent(BaseAgent):
 
 def _check_syntax(body: str) -> str | None:
     """Return a syntax error message if body is not valid Python, else None."""
-    # Wrap in a dummy function so the indented body is a valid parse unit
-    wrapped = "def _f():\n" + "\n".join("    " + line if line.strip() else line for line in body.splitlines())
+    # Body is already 4-space indented; just wrap in a dummy function.
+    wrapped = "def _f():\n" + body
     try:
         ast.parse(wrapped)
         return None
@@ -183,30 +194,40 @@ def _check_syntax(body: str) -> str | None:
 
 
 def _normalise_indent(body: str) -> str:
-    """Normalise function body to use exactly 4-space base indentation.
+    """Normalise function body to exactly 4-space base indentation.
 
-    Anchors on the first non-empty line's indent level (the LLM's actual base
-    indent) rather than the minimum-common-whitespace baseline, which breaks
-    when import statements sit at column-0 while body lines are at column-4.
+    Handles all common LLM indentation mistakes:
+    - All lines at 0-indent → shift to 4.
+    - All lines at N-indent → dedent to 0, re-add 4 (preserving relative nesting).
+    - Mixed 0-and-positive indent (e.g. 0-indent imports + 4-indent body) →
+      promote 0-indent lines to the minimum positive indent, then dedent+re-add 4.
     """
+    import textwrap
     lines = body.splitlines()
-    # Strip empty leading/trailing lines
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
     if not lines:
         return "    raise NotImplementedError()"
-    # Determine the base indent from the first non-empty line
-    first_non_empty = next((l for l in lines if l.strip()), lines[0])
-    base_indent = len(first_non_empty) - len(first_non_empty.lstrip())
+
+    non_empty_indents = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+    min_indent = min(non_empty_indents)
+    positive_indents = [i for i in non_empty_indents if i > 0]
+
+    if min_indent == 0 and positive_indents:
+        # Some lines forgot indentation. Promote them to the minimum positive
+        # indent so relative nesting is preserved after dedent.
+        base = min(positive_indents)
+        lines = [
+            " " * base + line if (line.strip() and len(line) - len(line.lstrip()) == 0) else line
+            for line in lines
+        ]
+
+    # textwrap.dedent strips the common leading whitespace, preserving nesting.
+    dedented = textwrap.dedent("\n".join(lines))
+
     result = []
-    for line in lines:
-        if not line.strip():
-            result.append("")
-            continue
-        line_indent = len(line) - len(line.lstrip())
-        # Map base_indent → 4, base_indent+4 → 8, etc.
-        relative = line_indent - base_indent
-        result.append("    " + " " * max(relative, 0) + line.lstrip())
+    for line in dedented.splitlines():
+        result.append(("    " + line) if line.strip() else "")
     return "\n".join(result)

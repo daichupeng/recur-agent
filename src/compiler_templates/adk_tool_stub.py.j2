@@ -7,7 +7,7 @@ from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 
 
-def _{{ node.name }}_impl(
+def {{ node.name }}(
 {%- for param_name, param_schema in (node.input_schema.get("properties") or {}).items() %}
     {{ param_name }}: {{ param_schema | pydantic_type }},
 {%- endfor %}
@@ -23,19 +23,23 @@ def _{{ node.name }}_impl(
         dict: {{ node.output_schema | schema_summary }}
     """
 {%- if node.implementation %}
-{{ node.implementation }}
+{{ node.implementation | indent_body }}
 {%- else %}
     # TODO: Implement atomic skill — {{ node.name }}
     raise NotImplementedError("{{ node.name }} is not yet implemented")
 {%- endif %}
 
 
-{{ node.name }} = FunctionTool(_{{ node.name }}_impl)
+_{{ node.name }}_tool = FunctionTool({{ node.name }})
 
 {{ node.name }}_agent = LlmAgent(
     name="{{ node.name }}",
-    model="gemini-2.0-flash",
+    model="{{ gemini_model }}",
     description="{{ node.description }}",
-    instruction="{{ node.description }}. Call the {{ node.name }} tool with the appropriate arguments derived from session state.",
-    tools=[{{ node.name }}],
+    instruction=(
+        "Call the {{ node.name }} tool with these exact arguments:\n"
+        "{{ node.input_schema | schema_summary }}\n"
+        "Read each value from the session state key matching its name."
+    ),
+    tools=[_{{ node.name }}_tool],
 )

@@ -1435,7 +1435,23 @@
           <strong>Google ADK web UI</strong> — a live chat interface
           with real-time event tracing.
         </div>
-        <button class="btn-sandbox-start" id="btn-sandbox-start" onclick="startSandbox()">
+
+        <!-- Credential form — populated by loadRequiredEnvVars() on page load -->
+        <div id="env-form-wrap" style="display:none;margin:16px 0 4px;width:100%;max-width:480px;text-align:left">
+          <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:10px;">
+            Required API keys
+          </div>
+          <div id="env-fields"></div>
+          <button id="btn-save-env"
+                  onclick="saveEnvVars()"
+                  style="margin-top:10px;padding:7px 18px;border:none;border-radius:6px;
+                         background:var(--accent);color:#fff;font-size:13px;cursor:pointer">
+            Save keys
+          </button>
+          <span id="env-save-status" style="margin-left:10px;font-size:12px;color:var(--text-secondary)"></span>
+        </div>
+
+        <button class="btn-sandbox-start" id="btn-sandbox-start" onclick="startSandbox()" disabled>
           ▶&nbsp; Run in Sandbox
         </button>
       </div>
@@ -1480,6 +1496,7 @@
 // ── State ───────────────────────────────────────────────────────────────────
 let currentStatus = {{ status | tojson }};
 let currentLayer  = {{ current_layer | int }};
+const TREE_ENDPOINT = {{ (tree_endpoint if tree_endpoint is defined else '/tree') | tojson }};
 let autoRefreshTimer = null;
 
 // ── Status pill rendering ────────────────────────────────────────────────────
@@ -1685,7 +1702,7 @@ function switchTab(tab) {
 const openByDepth = {};
 
 function loadTree() {
-  fetch('/tree')
+  fetch(TREE_ENDPOINT)
     .then(r => r.json())
     .then(data => {
       const container = document.getElementById('tree-root');
@@ -1821,6 +1838,74 @@ function renderSandboxStatus(status) {
   else if (status === 'error') badge.classList.add('idle');
   else badge.classList.add('idle');
   label.textContent = status.replace(/_/g, ' ');
+}
+
+async function loadRequiredEnvVars() {
+  const btn = document.getElementById('btn-sandbox-start');
+  if (!btn) return;  // not in "done" state
+  try {
+    const r = await fetch('/sandbox/required_env');
+    if (!r.ok) { btn.disabled = false; return; }
+    const { required, missing } = await r.json();
+    if (!required || required.length === 0) { btn.disabled = false; return; }
+
+    const wrap = document.getElementById('env-form-wrap');
+    const fields = document.getElementById('env-fields');
+    wrap.style.display = 'block';
+    fields.innerHTML = '';
+
+    required.forEach(key => {
+      const isMissing = missing.includes(key);
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px;';
+      row.innerHTML = `
+        <label style="font-size:12px;font-family:monospace;min-width:160px;color:${isMissing ? '#f87171' : 'var(--text-secondary)'}">
+          ${key}${isMissing ? ' *' : ' ✓'}
+        </label>
+        <input id="env-input-${key}" type="password"
+               placeholder="${isMissing ? 'required' : '••••••••'}"
+               style="flex:1;padding:5px 9px;border-radius:5px;border:1px solid var(--border);
+                      background:var(--bg-secondary);color:var(--text-primary);font-size:12px;font-family:monospace">
+      `;
+      fields.appendChild(row);
+    });
+
+    // Enable run only when no missing keys remain
+    btn.disabled = missing.length > 0;
+  } catch (_) {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveEnvVars() {
+  const fields = document.getElementById('env-fields');
+  if (!fields) return;
+  const env_vars = {};
+  fields.querySelectorAll('input[id^="env-input-"]').forEach(inp => {
+    if (inp.value.trim()) {
+      const key = inp.id.replace('env-input-', '');
+      env_vars[key] = inp.value.trim();
+    }
+  });
+  if (Object.keys(env_vars).length === 0) return;
+
+  const status = document.getElementById('env-save-status');
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/sandbox/env', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ env_vars }),
+    });
+    if (r.ok) {
+      status.textContent = 'Saved ✓';
+      await loadRequiredEnvVars();  // re-check — may now enable the button
+    } else {
+      status.textContent = 'Save failed';
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  }
 }
 
 async function startSandbox() {
@@ -1969,7 +2054,7 @@ async function loadImplReview() {
   if (!grid) return;
 
   try {
-    const r = await fetch('/tree');
+    const r = await fetch(TREE_ENDPOINT);
     if (!r.ok) throw new Error('Failed to fetch tree');
     const data = await r.json();
     if (!data || !data.root) {
@@ -1977,25 +2062,50 @@ async function loadImplReview() {
       return;
     }
 
-    // Collect all atomic nodes from the full tree
-    const atomics = [];
+    // Collect all atomic nodes grouped by depth (layer)
+    const byDepth = {};
     function collectAtomics(node) {
-      if (node.node_type === 'atomic') atomics.push(node);
+      if (node.node_type === 'atomic') {
+        const d = node.depth || 0;
+        if (!byDepth[d]) byDepth[d] = [];
+        byDepth[d].push(node);
+      }
       if (node.children) node.children.forEach(collectAtomics);
     }
     collectAtomics(data.root);
 
-    if (atomics.length === 0) {
-      grid.innerHTML = '<div class="impl-empty">No atomic nodes found.</div>';
+    const depths = Object.keys(byDepth).map(Number).sort((a, b) => b - a); // newest (deepest) first
+    const totalAtomics = depths.reduce((s, d) => s + byDepth[d].length, 0);
+
+    if (totalAtomics === 0) {
+      grid.innerHTML = '<div class="impl-empty">No atomic implementations — auto-approving…</div>';
+      // Auto-approve since there's nothing to review
+      if (currentStatus && currentStatus.startsWith('awaiting_impl_review')) {
+        await fetch('/approve_impl', { method: 'POST' }).catch(() => {});
+        setTimeout(() => location.reload(), 800);
+      }
       return;
     }
 
     grid.innerHTML = '';
     implLoaded = true;
 
-    for (const node of atomics) {
-      grid.appendChild(buildImplCard(node));
-    }
+    depths.forEach((depth, idx) => {
+      const nodes = byDepth[depth];
+      // Dotted divider before older layers
+      if (idx > 0) {
+        const divider = document.createElement('div');
+        divider.style.cssText = 'border-top:2px dashed var(--border-strong);margin:8px 0;position:relative;';
+        const label = document.createElement('span');
+        label.style.cssText = 'position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:var(--bg);padding:0 10px;font-size:11px;color:var(--text-tertiary);font-weight:500;letter-spacing:0.04em;text-transform:uppercase;';
+        label.textContent = `Layer ${depth} (older)`;
+        divider.appendChild(label);
+        grid.appendChild(divider);
+      }
+      for (const node of nodes) {
+        grid.appendChild(buildImplCard(node));
+      }
+    });
   } catch (err) {
     if (loading) loading.textContent = 'Error: ' + err.message;
   }
@@ -2193,6 +2303,11 @@ function esc(str) {
 // Auto-load impl tab if it starts active
 {% if status.startswith("awaiting_impl_review") %}
 loadImplReview();
+{% endif %}
+
+// Load required env vars if compilation is done
+{% if status == "done" %}
+loadRequiredEnvVars();
 {% endif %}
 </script>
 
