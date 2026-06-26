@@ -1,5 +1,5 @@
 """Main orchestration loop: snapshot → decompose → HITL-1 → schema → prompt-engineer
-→ implement → HITL-2 → compile → verify-repair."""
+→ implement → HITL-2 → compile → verify-repair → debug-loop."""
 from __future__ import annotations
 
 import asyncio
@@ -8,10 +8,11 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Awaitable, Optional
 
 from src.agents.compiler import CompilerAgent
 from src.agents.complexity_reviewer import ComplexityReviewAgent
+from src.agents.debug import DebugAgent, EnvProvider
 from src.agents.decomposer import DecomposerAgent
 from src.agents.prompt_engineer import PromptEngineerAgent
 from src.agents.schema_architect import SchemaArchitectAgent
@@ -54,6 +55,9 @@ async def run_pipeline(
     tree: SkillTree,
     events: PipelineEvents,
     output_dir: Path,
+    *,
+    env_provider: EnvProvider | None = None,
+    skip_debug: bool = False,
 ) -> Path:
     """Run the full recursive decomposition and compilation pipeline.
 
@@ -62,12 +66,16 @@ async def run_pipeline(
       → schema-hydration → prompt-engineer → tool-implementation → HITL-2 (approve / rollback)
       → advance layer
 
-    After all layers: compile → verify-repair → done.
+    After all layers: compile → verify-repair → debug-loop → done.
 
     Args:
         tree: The skill tree, initialised with a root node for the requirement.
         events: Shared asyncio events for HITL communication.
         output_dir: Directory where the compiled ADK project will be written.
+        env_provider: Async callback for collecting missing env vars during the debug phase.
+                      Signature: async (missing_names: list[str]) -> dict[str, str].
+                      If None, missing vars are logged but not fatal.
+        skip_debug: Set True to bypass the end-to-end debug loop (e.g. dry-run mode).
 
     Returns:
         Path to the generated project directory.
@@ -207,7 +215,28 @@ async def run_pipeline(
     logger.info("Running import verification on generated project...")
     await _verify_and_repair(project_dir, tool_implementor, events)
 
-    events.status = "done"
+    # ── DEBUG LOOP ─────────────────────────────────────────────────────────
+    if not skip_debug:
+        events.status = "debugging"
+        logger.info("Starting end-to-end debug loop for %s …", project_dir.name)
+        debug_agent = DebugAgent()
+        debug_result = await debug_agent.run(project_dir, tree, env_provider=env_provider)
+        if debug_result.success:
+            logger.info(
+                "[debug] Project validated successfully in %d iteration(s).",
+                debug_result.iterations,
+            )
+            events.status = "done"
+        else:
+            logger.warning(
+                "[debug] Debug loop exhausted (%d iterations) without passing tests.",
+                debug_result.iterations,
+            )
+            last_err = debug_result.errors[-1] if debug_result.errors else "unknown error"
+            events.status = f"debug_failed: {last_err[:120]}"
+    else:
+        events.status = "done"
+
     logger.info("Pipeline complete → %s", project_dir)
     return project_dir
 
@@ -318,10 +347,17 @@ async def _verify_and_repair(
         except Exception:
             tree = None
 
+    # Ensure project deps are installed before verifying
+    subprocess.run(["uv", "sync"], cwd=str(project_dir), capture_output=True)
+
     for iteration in range(1, _MAX_REPAIR_ITERATIONS + 1):
+        # Run inside the project venv via `uv run` so google-adk and other
+        # project deps are importable.  sys.executable (the host Python) does
+        # not have those packages installed.
         result = subprocess.run(
-            [sys.executable, "-c",
-             f"import sys; sys.path.insert(0, '{project_dir}'); import run"],
+            ["uv", "run", "python", "-c",
+             "import sys; sys.path.insert(0, '.'); import run"],
+            cwd=str(project_dir),
             capture_output=True,
             text=True,
         )

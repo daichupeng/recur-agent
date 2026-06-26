@@ -40,6 +40,15 @@ _sandbox: dict = {
     "notify": None,     # asyncio.Event — set when new log line added
 }
 
+# ── Debug env-var gate ─────────────────────────────────────────────────────
+# The debug loop calls `debug_env_provider(missing_names)` which suspends until
+# the frontend POSTs to /debug/env.  A fresh gate is created per request.
+_debug_env_gate: dict = {
+    "pending": [],      # list[str] — missing var names currently being requested
+    "provided": {},     # dict[str, str] — values submitted by the UI
+    "event": None,      # asyncio.Event — set when /debug/env is posted
+}
+
 
 def _sandbox_log(line: str) -> None:
     _sandbox["output"].append(line)
@@ -317,6 +326,73 @@ async def rollback_impl() -> dict:
     ev.approve_impl.clear()
     ev.rollback_impl.set()
     return {"ok": True, "action": "rollback_impl"}
+
+
+# ── Debug env-var endpoints ─────────────────────────────────────────────────
+
+
+@app.get("/debug/missing_env")
+async def debug_missing_env() -> dict:
+    """Return the env var names the debug loop is currently waiting on."""
+    return {
+        "pending": _debug_env_gate["pending"],
+        "provided": list(_debug_env_gate["provided"].keys()),
+    }
+
+
+class DebugEnvPayload(BaseModel):
+    env_vars: dict[str, str]
+
+
+@app.post("/debug/env")
+async def debug_provide_env(payload: DebugEnvPayload) -> dict:
+    """Supply missing env var values so the debug loop can continue.
+
+    Values are written to the project .env and the waiting debug_env_provider is unblocked.
+    """
+    if not payload.env_vars:
+        return {"ok": True, "written": 0}
+
+    _debug_env_gate["provided"].update(payload.env_vars)
+    if _debug_env_gate["event"] is not None:
+        _debug_env_gate["event"].set()
+
+    return {"ok": True, "written": len(payload.env_vars)}
+
+
+async def debug_env_provider(missing_names: list[str]) -> dict[str, str]:
+    """Async callback passed to DebugAgent: suspends until /debug/env is posted.
+
+    Sets pipeline status to "debug_awaiting_env" so the dashboard renders an env-var
+    collection form instead of the generic "Processing…" spinner.
+    Times out after 300 s so a headless run is not blocked forever.
+    """
+    if not missing_names:
+        return {}
+
+    gate = _debug_env_gate
+    gate["pending"] = list(missing_names)
+    gate["provided"] = {}
+    gate["event"] = asyncio.Event()
+
+    # Flip pipeline status so the dashboard stops auto-refreshing and shows the form
+    if _events is not None:
+        _events.status = "debug_awaiting_env"
+
+    logger.info("[debug] Waiting for env vars via UI: %s", missing_names)
+
+    try:
+        await asyncio.wait_for(gate["event"].wait(), timeout=300)
+    except asyncio.TimeoutError:
+        logger.warning("[debug] Timed out waiting for env vars; continuing without them.")
+
+    # Restore status to debugging so normal flow resumes
+    if _events is not None and _events.status == "debug_awaiting_env":
+        _events.status = "debugging"
+
+    result = {k: v for k, v in gate["provided"].items() if k in missing_names and v}
+    gate["pending"] = []
+    return result
 
 
 # ── Sandbox endpoints ───────────────────────────────────────────────────────

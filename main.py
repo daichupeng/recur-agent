@@ -79,6 +79,7 @@ async def _run_pipeline_for(
     output_dir: Path,
     *,
     set_events_fn,
+    env_provider=None,
 ) -> Path:
     """Create a fresh SkillTree + PipelineEvents and run the pipeline."""
     from src.orchestrator.pipeline import PipelineEvents, run_pipeline
@@ -99,12 +100,12 @@ async def _run_pipeline_for(
     events.current_tree = tree
     set_events_fn(events)
 
-    return await run_pipeline(tree, events, output_dir)
+    return await run_pipeline(tree, events, output_dir, env_provider=env_provider)
 
 
 async def _main_web(settings: dict, host: str, port: int, output_dir: Path) -> None:
     """Web mode: serve the landing page; pipeline starts when user submits the form."""
-    from src.ui.server import app, set_events, set_start_callback
+    from src.ui.server import app, debug_env_provider, set_events, set_start_callback
 
     async def start_callback(
         requirement: str,
@@ -114,7 +115,9 @@ async def _main_web(settings: dict, host: str, port: int, output_dir: Path) -> N
         out = Path(custom_output_dir) if custom_output_dir else output_dir
         try:
             result = await _run_pipeline_for(
-                requirement, project_name, out, set_events_fn=set_events
+                requirement, project_name, out,
+                set_events_fn=set_events,
+                env_provider=debug_env_provider,
             )
             logger.info("Done! Generated project at: %s", result)
         except Exception:
@@ -132,6 +135,22 @@ async def _main_web(settings: dict, host: str, port: int, output_dir: Path) -> N
     server = uvicorn.Server(config)
     logger.info("recur-agent web UI running at http://%s:%d", host, port)
     await server.serve()
+
+
+async def _cli_env_provider(missing_names: list[str]) -> dict[str, str]:
+    """Collect missing env vars interactively from stdin in CLI mode."""
+    if not missing_names:
+        return {}
+    print(f"\n[debug] The generated project requires these API keys/env vars: {missing_names}")
+    provided: dict[str, str] = {}
+    for name in missing_names:
+        try:
+            value = input(f"  Enter value for {name} (leave blank to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if value:
+            provided[name] = value
+    return provided
 
 
 async def _main_cli(args: argparse.Namespace, settings: dict) -> None:
@@ -166,6 +185,7 @@ async def _main_cli(args: argparse.Namespace, settings: dict) -> None:
             args.project_name,
             output_dir,
             set_events_fn=_capture_events,
+            env_provider=_cli_env_provider,
         )
         logger.info("Done! Generated project at: %s", result)
         server.should_exit = True

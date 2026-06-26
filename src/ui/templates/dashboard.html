@@ -1279,6 +1279,28 @@
   <!-- Main content -->
   <main class="content" id="content">
 
+    {% if status == "debug_awaiting_env" %}
+    <!-- ── Debug: waiting for API keys ───────────────────────────────────── -->
+    <div class="state-card" id="debug-env-card" style="border-color:var(--amber-border);max-width:520px">
+      <div class="state-icon">🔑</div>
+      <div class="state-title">API Keys Required</div>
+      <div class="state-desc" style="margin-bottom:20px">
+        The generated project needs these credentials to run end-to-end tests.
+        Enter the values below and click <strong>Submit</strong> to continue.
+      </div>
+      <div id="debug-env-fields" style="width:100%;text-align:left;margin-bottom:16px">
+        <!-- populated by JS -->
+      </div>
+      <button onclick="submitDebugEnv()"
+              style="padding:9px 24px;background:linear-gradient(135deg,var(--claude-orange),var(--accent));
+                     color:#fff;border:none;border-radius:var(--radius-sm);font-family:var(--font);
+                     font-size:14px;font-weight:600;cursor:pointer">
+        Submit &amp; continue
+      </button>
+      <div id="debug-env-status" style="margin-top:10px;font-size:12px;color:var(--text-secondary)"></div>
+    </div>
+    {% endif %}
+
     {% if status == "done" %}
     <!-- ── Done state ──────────────────────────────────────────────────── -->
     <div class="state-card done-card">
@@ -1683,7 +1705,7 @@ function toast(msg, type = 'info') {
 }
 
 // ── Auto-refresh when pipeline is processing ─────────────────────────────────
-{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and status != "done" %}
+{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and status != "done" and status != "debug_awaiting_env" %}
 autoRefreshTimer = setTimeout(() => location.reload(), 3500);
 {% endif %}
 
@@ -2309,6 +2331,69 @@ loadImplReview();
 {% if status == "done" %}
 loadRequiredEnvVars();
 {% endif %}
+
+// ── Debug env-var collection form ────────────────────────────────────────────
+{% if status == "debug_awaiting_env" %}
+(async function buildDebugEnvForm() {
+  try {
+    const r = await fetch('/debug/missing_env');
+    if (!r.ok) return;
+    const { pending } = await r.json();
+    const fields = document.getElementById('debug-env-fields');
+    if (!fields || !pending || pending.length === 0) return;
+    fields.innerHTML = '';
+    pending.forEach(key => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
+      row.innerHTML = `
+        <label style="font-size:12px;font-family:monospace;min-width:180px;
+                       color:var(--text-secondary);flex-shrink:0">${key}</label>
+        <input id="debug-env-${key}" type="password"
+               placeholder="enter value"
+               style="flex:1;padding:6px 10px;border-radius:6px;border:1.5px solid var(--border);
+                      background:var(--bg);color:var(--text-primary);font-size:13px;
+                      font-family:monospace;outline:none">
+      `;
+      fields.appendChild(row);
+    });
+  } catch (_) {}
+})();
+{% endif %}
+
+async function submitDebugEnv() {
+  const fields = document.getElementById('debug-env-fields');
+  if (!fields) return;
+  const env_vars = {};
+  fields.querySelectorAll('input[id^="debug-env-"]').forEach(inp => {
+    const val = inp.value.trim();
+    if (val) {
+      const key = inp.id.replace('debug-env-', '');
+      env_vars[key] = val;
+    }
+  });
+  if (Object.keys(env_vars).length === 0) {
+    document.getElementById('debug-env-status').textContent = 'Please enter at least one value.';
+    return;
+  }
+  const statusEl = document.getElementById('debug-env-status');
+  statusEl.textContent = 'Submitting…';
+  try {
+    const r = await fetch('/debug/env', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ env_vars }),
+    });
+    if (r.ok) {
+      statusEl.textContent = 'Submitted ✓ — continuing debug run…';
+      // Auto-refresh once pipeline resumes
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      statusEl.textContent = 'Submit failed — try again.';
+    }
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+}
 </script>
 
 </body>

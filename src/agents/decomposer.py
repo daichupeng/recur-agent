@@ -148,18 +148,7 @@ class DecomposerAgent(BaseAgent):
         )
         user_content = f"{hint}\n\n{classify_text}" if hint else classify_text
 
-        message = await self._call(
-            messages=[{"role": "user", "content": user_content}],
-            output_schema=_OUTPUT_SCHEMA,
-        )
-
-        text_block = _find_text_block(message)
-        results: list[dict[str, Any]] = json.loads(text_block.text)
-
-        if len(results) != len(nodes):
-            raise ValueError(
-                f"Decomposer returned {len(results)} results for {len(nodes)} nodes"
-            )
+        results = await self._call_with_count_check(user_content, nodes)
 
         for node, result in zip(nodes, results):
             node.node_type = NodeType(result["node_type"])
@@ -179,3 +168,65 @@ class DecomposerAgent(BaseAgent):
 
         self.log_usage()
         return nodes
+
+    async def _call_with_count_check(
+        self, user_content: str, nodes: list[SkillNode]
+    ) -> list[dict[str, Any]]:
+        """Call the LLM and ensure the result has exactly len(nodes) entries.
+
+        Retry once with an explicit count reminder if the first response is short.
+        Fall back to one-node-at-a-time if the retry also mismatches.
+        """
+        expected = len(nodes)
+
+        # First attempt
+        message = await self._call(
+            messages=[{"role": "user", "content": user_content}],
+            output_schema=_OUTPUT_SCHEMA,
+        )
+        results: list[dict[str, Any]] = json.loads(_find_text_block(message).text)
+        if len(results) == expected:
+            return results
+
+        logger.warning(
+            "Decomposer returned %d results for %d nodes — retrying with explicit count.",
+            len(results), expected,
+        )
+
+        # Second attempt: reinforce the expected count
+        node_dicts = [{"name": n.name, "description": n.description} for n in nodes]
+        retry_content = (
+            f"IMPORTANT: You must return EXACTLY {expected} JSON objects — one per input node. "
+            f"Your previous response had {len(results)} entries, which is wrong.\n\n"
+            "Classify and expand the following skill nodes:\n"
+            + json.dumps(node_dicts, indent=2)
+        )
+        message = await self._call(
+            messages=[{"role": "user", "content": retry_content}],
+            output_schema=_OUTPUT_SCHEMA,
+        )
+        results = json.loads(_find_text_block(message).text)
+        if len(results) == expected:
+            return results
+
+        logger.warning(
+            "Retry also returned %d results — falling back to one-at-a-time.", len(results)
+        )
+
+        # Last resort: process each node individually and concatenate
+        all_results: list[dict[str, Any]] = []
+        for node in nodes:
+            single_content = (
+                "Classify and expand the following skill nodes:\n"
+                + json.dumps([{"name": node.name, "description": node.description}], indent=2)
+            )
+            msg = await self._call(
+                messages=[{"role": "user", "content": single_content}],
+                output_schema=_OUTPUT_SCHEMA,
+            )
+            single = json.loads(_find_text_block(msg).text)
+            if not single:
+                raise ValueError(f"Decomposer returned empty result for node '{node.name}'")
+            all_results.append(single[0])
+
+        return all_results
