@@ -18,6 +18,7 @@ from src.agents.prompt_engineer import PromptEngineerAgent
 from src.agents.schema_architect import SchemaArchitectAgent
 from src.agents.tool_implementor import ToolImplementorAgent
 from src.orchestrator.state import ExecType, NodeType, SkillNode, SkillTree
+from src.skill_lib import SkillEntry, SkillLib
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +59,14 @@ async def run_pipeline(
     *,
     env_provider: EnvProvider | None = None,
     skip_debug: bool = False,
+    skill_lib_dir: Path | None = None,
 ) -> Path:
     """Run the full recursive decomposition and compilation pipeline.
 
     Flow per layer:
       snapshot → decompose → complexity-review → HITL-1 (approve / rollback / redecompose)
       → schema-hydration → prompt-engineer → tool-implementation → HITL-2 (approve / rollback)
-      → advance layer
+      → advance layer → save new skills to skill_lib
 
     After all layers: compile → verify-repair → debug-loop → done.
 
@@ -76,11 +78,16 @@ async def run_pipeline(
                       Signature: async (missing_names: list[str]) -> dict[str, str].
                       If None, missing vars are logged but not fatal.
         skip_debug: Set True to bypass the end-to-end debug loop (e.g. dry-run mode).
+        skill_lib_dir: Path to the skill_lib directory. Defaults to <output_dir>/../skill_lib.
 
     Returns:
         Path to the generated project directory.
     """
-    decomposer = DecomposerAgent()
+    if skill_lib_dir is None:
+        skill_lib_dir = output_dir.parent / "skill_lib"
+    skill_lib = SkillLib(skill_lib_dir)
+
+    decomposer = DecomposerAgent(skill_lib=skill_lib)
     complexity_reviewer = ComplexityReviewAgent()
     schema_architect = SchemaArchitectAgent()
     prompt_engineer = PromptEngineerAgent()
@@ -198,6 +205,9 @@ async def run_pipeline(
             logger.info("Implementation rollback complete. Retrying layer %d.", tree.current_layer)
             continue
 
+        # ── SAVE NEW SKILLS TO SKILL LIB ──────────────────────────────────
+        _save_new_skills_to_lib(tree, skill_lib)
+
         # ── SAVE PER-LAYER SNAPSHOT ────────────────────────────────────────
         layer_dir = output_dir / tree.project_name / "layers" / f"layer_{tree.current_layer}"
         tree.save_json(layer_dir / "blueprint_verified.json")
@@ -208,7 +218,7 @@ async def run_pipeline(
     # ── COMPILE ────────────────────────────────────────────────────────────
     events.status = "compiling"
     logger.info("Compiling Google ADK project...")
-    project_dir = compiler.compile(tree, output_dir)
+    project_dir = compiler.compile(tree, output_dir, skill_lib=skill_lib)
 
     # ── VERIFY AND REPAIR ──────────────────────────────────────────────────
     events.status = "verifying"
@@ -432,3 +442,49 @@ def _first_error_line(stderr: str) -> str:
 
 async def _wait_event(event: asyncio.Event) -> None:
     await event.wait()
+
+
+# ---------------------------------------------------------------------------
+# Skill library helpers
+# ---------------------------------------------------------------------------
+
+def _save_new_skills_to_lib(tree: SkillTree, skill_lib: SkillLib) -> None:
+    """Persist fully-hydrated atomic nodes to the skill_lib if not already there.
+
+    Nodes that were sourced from the skill_lib (skill_lib_ref is set) are skipped
+    because they already exist. Only nodes that were newly implemented are saved.
+    """
+    saved = 0
+    for node in tree.root.topological_order():
+        if node.node_type != NodeType.ATOMIC:
+            continue
+        if node.skill_lib_ref:
+            continue  # already in the library
+        if not node.input_schema or not node.output_schema:
+            continue  # not fully hydrated yet
+
+        # Only save if we have an implementation or instruction
+        has_content = bool(node.implementation or node.instruction)
+        if not has_content:
+            continue
+
+        # Skip if an entry with the same name already exists
+        if skill_lib.get(node.name):
+            continue
+
+        exec_type_str = node.exec_type.value if node.exec_type else "LLM_PROMPT"
+        entry = SkillEntry(
+            name=node.name,
+            description=node.description,
+            exec_type=exec_type_str,
+            implementation=node.implementation or "",
+            instruction=node.instruction or "",
+            input_schema=node.input_schema,
+            output_schema=node.output_schema,
+        )
+        skill_lib.save(entry)
+        node.skill_lib_ref = node.name  # mark it so we don't re-save next layer
+        saved += 1
+
+    if saved:
+        logger.info("Saved %d new skill(s) to skill_lib.", saved)

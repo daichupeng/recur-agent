@@ -5,6 +5,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Optional
@@ -56,14 +58,14 @@ def _sandbox_log(line: str) -> None:
         _sandbox["notify"].set()
 
 
-async def _stream_subprocess(cmd: list[str], cwd: Path) -> int:
+async def _stream_subprocess(cmd: list[str], cwd: Path, env: dict | None = None) -> int:
     """Run a subprocess, stream output to sandbox log. Returns exit code."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ},
+        env=env if env is not None else {**os.environ},
     )
     assert proc.stdout is not None
     async for raw in proc.stdout:
@@ -80,24 +82,31 @@ async def _run_sandbox(project_path: Path, port: int) -> None:
 
     _sandbox_log(f"▶ Setting up sandbox for {project_path.name}…")
 
-    # Remove any existing .venv (may have been created on a different OS/arch).
-    # Use subprocess rm -rf instead of shutil.rmtree because broken symlinks
-    # inside the venv cause rmtree to fail silently on Linux, leaving a corrupt
-    # directory that makes `uv sync` error with "not a valid Python environment".
+    # Remove any existing .venv so uv always creates a fresh, valid environment.
+    # shutil.rmtree with an onerror handler fixes read-only files/dirs that
+    # would otherwise cause rm -rf to fail with "Directory not empty" on some
+    # filesystems (e.g. Docker overlayfs).
     venv_dir = project_path / ".venv"
     if venv_dir.exists() or venv_dir.is_symlink():
-        await _stream_subprocess(["rm", "-rf", str(venv_dir)], project_path)
+        def _force_remove(func, path, _exc):
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        shutil.rmtree(venv_dir, onerror=_force_remove)
+
+    # Pin the venv location so uv ignores any ambient VIRTUAL_ENV in the shell.
+    uv_env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(venv_dir)}
 
     # Install generated project dependencies
     _sandbox_log("▶ Running: uv sync")
     rc = await _stream_subprocess(
         [sys.executable, "-m", "uv", "sync"],
         project_path,
+        env=uv_env,
     )
     if rc != 0:
         # Try plain uv if python -m uv fails
         _sandbox_log("  (retrying with bare uv)")
-        rc = await _stream_subprocess(["uv", "sync"], project_path)
+        rc = await _stream_subprocess(["uv", "sync"], project_path, env=uv_env)
     if rc != 0:
         _sandbox["status"] = "error"
         _sandbox_log(f"✗ uv sync failed (exit {rc})")

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from src.agents.base_agent import BaseAgent, _find_text_block
 from src.orchestrator.state import CompositionType, ExecType, NodeType, SkillNode
+from src.skill_lib import SkillLib
 
 logger = logging.getLogger(__name__)
 
@@ -15,57 +16,66 @@ _SYSTEM_PROMPT = """You are the Decomposer Agent in a recursive skill-tree gener
 Your job is to classify each skill node as either COMPOSITE or ATOMIC, and for COMPOSITE nodes
 to draft their immediate sub-skills.
 
-ATOMIC DEFINITION — a skill is atomic if its core logic can ENTIRELY be executed using exactly
-ONE of the following three patterns, with NO further routing, branching, or sub-coordination:
-1. DETERMINISTIC_CODE — purely standard code (SQL query, regex parse, math formula, JSON mapping)
-2. EXTERNAL_API — a single external call (Stripe charge, Slack webhook, weather fetch)
-3. OPENSOURCE_LIBRARY - a standard code utilizing well-known open-source libraries (pandas, yfinance, scikit-learn, etc.) Used for specialized tasks where specific libraries are good at.
-4. LLM_PROMPT — a single-turn LLM prompt with zero tool-calling loops (sentiment classify,
-   schema extraction, single-paragraph summarize)
+## Default to ATOMIC — the key insight
 
-A skill is COMPOSITE if it requires multiple of the above, orchestration, routing, or
-conditional logic that spans more than one of those patterns.
+Skills in this system are NOT simple one-liners. Each atomic skill is a fully-implemented
+Python function (or a richly-instructed LLM agent) that can contain imports, helper logic,
+loops, conditionals, error handling, and multi-step computation — all within a single skill
+unit. This means a skill that "does several things" but stays within one domain and one
+execution pattern is STILL atomic.
 
-## ADK runtime constraints (you MUST follow these when choosing composition_type)
+ATOMIC exec types:
+1. DETERMINISTIC_CODE — pure Python logic (string/math/data transforms, parsing, calculations,
+   filtering, aggregation, sorting — even multi-step pipelines within one domain).
+2. EXTERNAL_API — one external service (a single API client call, even if it includes
+   pagination, retries, or response normalization).
+3. OPENSOURCE_LIBRARY — specialized computation using well-known libraries (pandas, numpy,
+   scikit-learn, yfinance, etc.) — even complex multi-step workflows within that library.
+4. LLM_PROMPT — a single LLM call (classification, extraction, summarization, generation,
+   scoring — even over many items in one prompt).
 
-SEQUENTIAL — use by default for any ordered multi-step flow.
+A skill MUST stay ATOMIC if it operates within one of the above patterns, even if its
+implementation would be dozens of lines of code.
+
+## Only go COMPOSITE when you MUST
+
+A skill is COMPOSITE only when it genuinely requires:
+  (a) A LOOP where one agent must repeat until a dynamic exit condition is met at runtime, OR
+  (b) Crossing fundamentally different domains/execution patterns where the sub-tasks are
+      independently useful AND the combination cannot be expressed as a single function
+      (e.g. "fetch tweets from API, then analyze with an LLM" — these are truly different
+      agents and the split has clear value).
+
+Do NOT go composite for:
+  - Multi-step logic within one domain (e.g. "compute similarity then cluster" → ATOMIC OPENSOURCE_LIBRARY)
+  - Sequential transforms over the same data type (e.g. "normalize then score then aggregate" → ATOMIC DETERMINISTIC_CODE)
+  - Aggregation + distribution + ranking → one ATOMIC DETERMINISTIC_CODE
+  - Any task expressible as a single Python function, even a complex one
+
+## ADK runtime constraints (only relevant when you DO choose COMPOSITE)
+
+SEQUENTIAL — use by default for ordered multi-step flow across truly different agents.
   Generated as: SequentialAgent(sub_agents=[child1, child2, ...])
-  Children run in sequence; each child's output is passed to the next via session state.
 
 PARALLEL — use ONLY when children are fully independent (no data dependency between them).
   Generated as: ParallelAgent(sub_agents=[child1, child2, ...])
-  All children run concurrently; their outputs are merged.
 
-LOOP — use ONLY when:
-  (a) exactly ONE child agent is being repeated, AND
-  (b) that child agent can detect a terminal condition and signal it via ADK escalation.
-  Never use LOOP for multi-step flows or when the exit condition is external.
-  If unsure, use SEQUENTIAL with a dedicated termination-check step instead.
+LOOP — use ONLY when exactly ONE child repeats until it self-terminates via ADK escalation.
   Generated as: LoopAgent(sub_agents=[one_agent], max_iterations=10)
-  The single sub-agent must call actions.escalate() to terminate the loop.
+  The single sub-agent must call actions.escalate() to terminate.
 
-LLM_COORDINATOR — use for routing/dispatch where the decision is ambiguous at design time.
-  The coordinator is an LlmAgent that routes to children based on context.
-  Its routing instruction is auto-generated from each child's description.
-  Generated as: LlmAgent(sub_agents=[...], instruction="Route based on ...")
-  Use this only when the routing logic cannot be expressed as a predictable sequence.
+LLM_COORDINATOR — use ONLY for dynamic routing where the routing logic is ambiguous at
+  design time and cannot be expressed as a sequence.
 
-## Simplicity bias (important)
-Prefer ATOMIC over COMPOSITE whenever there is reasonable doubt. If a skill *could* be
-expressed as a single LLM prompt or a single deterministic transform, classify it ATOMIC even
-if it feels slightly richer than a textbook example. Over-decomposition creates unnecessary
-layers that are harder to maintain and test.
-
-When you do classify a node COMPOSITE, prefer 2-3 tightly-scoped children over 4-5 broader
-ones. Each child should itself be obviously atomic or obviously composite — avoid children
-whose classification is ambiguous. Avoid introducing a composite child solely to group two
-atomic siblings; flatten when possible.
+## Composite children limit
+When you do make a node COMPOSITE, generate 2-3 children maximum. If 4-5 children feel
+necessary, that usually means the scope is too broad — collapse related steps into atoms.
 
 Rules of thumb:
 - Atomic interfaces: inputs and outputs are strict data structures (Dict, bool, str, int, etc.)
 - Composite interfaces: outputs are state transitions or ambiguous objects feeding downstream engines
 
-For COMPOSITE nodes, generate 2-5 direct sub-skills at the next level of granularity.
+For COMPOSITE nodes, generate 2-3 direct sub-skills at the next level of granularity.
 Sub-skill names must be snake_case function-style identifiers.
 
 You MUST respond with a JSON array parallel to the input array — one entry per input node:
@@ -125,8 +135,9 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 class DecomposerAgent(BaseAgent):
-    def __init__(self) -> None:
+    def __init__(self, skill_lib: Optional[SkillLib] = None) -> None:
         super().__init__(system_prompt=_SYSTEM_PROMPT)
+        self._skill_lib = skill_lib
 
     async def decompose(self, nodes: list[SkillNode], hint: str | None = None) -> list[SkillNode]:
         """Classify and expand a batch of nodes. Returns the same nodes mutated in-place.
@@ -139,12 +150,30 @@ class DecomposerAgent(BaseAgent):
         if not nodes:
             return nodes
 
+        # Build skill_lib context to inject into the prompt when matches exist
+        skill_context = ""
+        if self._skill_lib:
+            all_query = " ".join(f"{n.name} {n.description}" for n in nodes)
+            matches = self._skill_lib.search("", all_query, top_k=5)
+            if matches:
+                refs = "\n".join(
+                    f"  - {e.name} ({e.exec_type}): {e.description}" for e in matches
+                )
+                skill_context = (
+                    "\n\nThe following skills already exist in the shared skill library. "
+                    "Reuse them as atomic children (using exactly their listed name) when "
+                    "they match a sub-task, rather than proposing brand-new equivalents:\n"
+                    + refs
+                    + "\n"
+                )
+
         node_dicts = [
             {"name": n.name, "description": n.description} for n in nodes
         ]
         classify_text = (
             "Classify and expand the following skill nodes:\n"
             + json.dumps(node_dicts, indent=2)
+            + skill_context
         )
         user_content = f"{hint}\n\n{classify_text}" if hint else classify_text
 
@@ -164,6 +193,32 @@ class DecomposerAgent(BaseAgent):
                         parent_id=node.id,
                         depth=node.depth + 1,
                     )
+                    # If this child name matches a skill_lib entry, pre-fill
+                    # its fields and mark the reference so we skip re-implementation.
+                    if self._skill_lib:
+                        lib_entry = self._skill_lib.get(child_dict["name"])
+                        if lib_entry is None:
+                            # Fuzzy-match by description as a fallback
+                            candidates = self._skill_lib.search(
+                                child_dict["name"], child_dict["description"], top_k=1
+                            )
+                            lib_entry = candidates[0] if candidates else None
+                        if lib_entry:
+                            child.skill_lib_ref = lib_entry.name
+                            child.exec_type = ExecType(lib_entry.exec_type) if lib_entry.exec_type else None
+                            child.node_type = NodeType.ATOMIC
+                            if lib_entry.input_schema:
+                                child.input_schema = lib_entry.input_schema
+                            if lib_entry.output_schema:
+                                child.output_schema = lib_entry.output_schema
+                            if lib_entry.implementation:
+                                child.implementation = lib_entry.implementation
+                            if lib_entry.instruction:
+                                child.instruction = lib_entry.instruction
+                            logger.info(
+                                "Child '%s' resolved from skill_lib entry '%s'.",
+                                child.name, lib_entry.name,
+                            )
                     node.children.append(child)
 
         self.log_usage()

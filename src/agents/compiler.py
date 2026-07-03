@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from src.orchestrator.state import CompositionType, ExecType, NodeType, SkillNode, SkillTree
+from src.skill_lib import SkillLib
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ class CompilerAgent:
     # Public entry point
     # ------------------------------------------------------------------
 
-    def compile(self, tree: SkillTree, output_dir: Path) -> Path:
+    def compile(self, tree: SkillTree, output_dir: Path, skill_lib: SkillLib | None = None) -> Path:
         """Write the Google ADK project to output_dir/{project_name}/."""
         project_dir = output_dir / tree.project_name
         atomics_dir = project_dir / "atomics"
@@ -235,8 +236,72 @@ class CompilerAgent:
             shutil.copy2(root_env, target_env)
             logger.info("Copied .env to %s", project_dir)
 
+        # Copy referenced skill_lib entries into the output project as SKILL.md files
+        if skill_lib:
+            self._copy_skill_lib(tree, project_dir, skill_lib)
+
         logger.info("Compilation complete → %s", project_dir)
         return project_dir
+
+    # ------------------------------------------------------------------
+    # Skill library copy
+    # ------------------------------------------------------------------
+
+    def _copy_skill_lib(self, tree: SkillTree, project_dir: Path, skill_lib: SkillLib) -> None:
+        """Copy SKILL.md files for all skill_lib-referenced nodes into the project.
+
+        Destination: <project_dir>/skill_lib/<skill_name>/SKILL.md
+        Also writes a skill_reader.py so the project can load skills at runtime.
+        """
+        import shutil
+
+        referenced: set[str] = set()
+        for node in tree.root.topological_order():
+            if node.skill_lib_ref:
+                referenced.add(node.skill_lib_ref)
+        # Also save every atomic node that has an implementation (new skills)
+        for node in tree.root.topological_order():
+            if node.node_type.value == "atomic" and not node.skill_lib_ref:
+                referenced.add(node.name)
+
+        if not referenced:
+            return
+
+        dest_lib = project_dir / "skill_lib"
+        dest_lib.mkdir(exist_ok=True)
+
+        for ref_name in sorted(referenced):
+            entry = skill_lib.get(ref_name)
+            if entry and entry.skill_dir:
+                src = entry.skill_dir / "SKILL.md"
+                if src.exists():
+                    dest_dir = dest_lib / ref_name
+                    dest_dir.mkdir(exist_ok=True)
+                    shutil.copy2(src, dest_dir / "SKILL.md")
+                    logger.debug("Copied skill_lib/%s/SKILL.md to project.", ref_name)
+
+        # Write a thin skill_reader.py so the generated project can load skills
+        skill_reader_code = (
+            '"""skill_reader — load SKILL.md entries from the bundled skill_lib."""\n'
+            "from __future__ import annotations\n"
+            "import sys\n"
+            "from pathlib import Path\n\n"
+            "_HERE = Path(__file__).parent.resolve()\n"
+            "sys.path.insert(0, str(_HERE.parent.parent))  # ensure src/ is importable if needed\n\n"
+            "from src.skill_lib import SkillLib, SkillEntry  # noqa: E402\n\n"
+            "_skill_lib: SkillLib | None = None\n\n\n"
+            "def get_skill_lib() -> SkillLib:\n"
+            '    """Return the singleton SkillLib loaded from this project\'s skill_lib/ dir."""\n'
+            "    global _skill_lib\n"
+            "    if _skill_lib is None:\n"
+            "        _skill_lib = SkillLib(Path(__file__).parent / 'skill_lib')\n"
+            "    return _skill_lib\n\n\n"
+            "def get_skill(name: str) -> SkillEntry | None:\n"
+            '    """Retrieve one skill by name, or None if not found."""\n'
+            "    return get_skill_lib().get(name)\n"
+        )
+        (project_dir / "skill_reader.py").write_text(skill_reader_code)
+        logger.info("Wrote skill_reader.py and copied %d skill(s) to %s.", len(referenced), dest_lib)
 
     # ------------------------------------------------------------------
     # Recursive compiler core

@@ -48,6 +48,7 @@ class SkillNode(BaseModel):
     state_reads: list[str] = Field(default_factory=list)    # ADK session state keys this node reads
     state_writes: list[str] = Field(default_factory=list)   # ADK session state keys this node writes
     instruction: Optional[str] = None  # Set by PromptEngineerAgent; engineered system prompt for LLM agents
+    skill_lib_ref: Optional[str] = None  # Name of the skill_lib entry this node was sourced from
 
     def get_nodes_at_depth(self, target_depth: int) -> list["SkillNode"]:
         """Return all nodes (including self) at the given depth."""
