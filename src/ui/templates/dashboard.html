@@ -1113,6 +1113,58 @@
     .btn-approve-impl:hover { opacity: 0.88; transform: translateY(-1px); }
     .btn-approve-impl:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
 
+    /* Retry with feedback (HITL-2 per-skill) */
+    .retry-section {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      margin-top: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .retry-feedback-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .retry-feedback-ta {
+      flex: 1;
+      font-family: var(--font);
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-primary);
+      background: var(--surface-2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 7px 10px;
+      resize: vertical;
+      outline: none;
+      min-height: 54px;
+      transition: border-color 0.15s;
+    }
+
+    .retry-feedback-ta:focus { border-color: #7c3aed; }
+    .retry-feedback-ta::placeholder { color: var(--text-tertiary); }
+
+    .btn-retry-skill {
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 7px 14px;
+      background: var(--amber-bg);
+      color: var(--amber);
+      border: 1.5px solid var(--amber-border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.1s;
+      flex-shrink: 0;
+    }
+    .btn-retry-skill:hover { background: #fef3c7; }
+    .btn-retry-skill:disabled { opacity: 0.45; cursor: not-allowed; }
+
     .review-banner.impl-banner {
       background: #f5f3ff;
       border-color: #ddd6fe;
@@ -1637,7 +1689,7 @@
           <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
           <path d="M8 5v4M8 11v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
-        Implementation ready for review. Approve to compile, or reject to retry the whole layer.
+        Implementation ready for review. Use <strong>Retry with feedback</strong> on individual skills, approve to compile, or reject to retry the whole layer.
       </div>
       {% endif %}
 
@@ -2374,8 +2426,8 @@ async function doRollbackImpl(btn) {
 // ── Implementation review loader ──────────────────────────────────────────────
 let implLoaded = false;
 
-async function loadImplReview() {
-  if (implLoaded) return;
+async function loadImplReview(force = false) {
+  if (implLoaded && !force) return;
   const grid = document.getElementById('impl-grid');
   const loading = document.getElementById('impl-loading');
   if (!grid) return;
@@ -2536,15 +2588,15 @@ function buildImplCard(node) {
     body.appendChild(sec);
   }
 
-  // Tool implementation (editable code)
+  // Tool implementation (editable code) — strip leading 4-space indent for display
   if (node.exec_type !== 'LLM_PROMPT') {
     const sec = document.createElement('div');
-    sec.innerHTML = '<div class="impl-subsection-label">Implementation (function body, 4-space indent)</div>';
+    sec.innerHTML = '<div class="impl-subsection-label">Implementation (function body)</div>';
     const ta = document.createElement('textarea');
     ta.className = 'impl-editable-code';
     ta.dataset.implField = 'implementation';
     ta.rows = 14;
-    ta.value = node.implementation || '';
+    ta.value = stripBaseIndent(node.implementation || '');
     ta.spellcheck = false;
     sec.appendChild(ta);
     body.appendChild(sec);
@@ -2559,6 +2611,21 @@ function buildImplCard(node) {
   saveBtn.onclick = () => saveImplNode(node.id, saveBtn, body);
   footer.appendChild(saveBtn);
   body.appendChild(footer);
+
+  // Retry with feedback section
+  const retrySection = document.createElement('div');
+  retrySection.className = 'retry-section';
+  retrySection.innerHTML = `
+    <div class="impl-subsection-label" style="margin-bottom:0">Retry with feedback</div>
+    <div class="retry-feedback-row">
+      <textarea class="retry-feedback-ta" id="retry-ta-${node.id}"
+                placeholder="Describe what to change or fix…" rows="2"></textarea>
+      <button class="btn-retry-skill" id="retry-btn-${node.id}"
+              onclick="retrySkill('${node.id}')">↺ Retry</button>
+    </div>
+    <div id="retry-status-${node.id}" style="font-size:11px;color:var(--text-tertiary)"></div>
+  `;
+  body.appendChild(retrySection);
 
   card.appendChild(body);
   return card;
@@ -2577,6 +2644,9 @@ async function saveImplNode(nodeId, btn, bodyEl) {
         toast(`Invalid JSON in ${field.replace('_', ' ')}`, 'error');
         throw new Error('json_parse');
       }
+    } else if (field === 'implementation') {
+      // Re-add the 4-space base indent the server and compiler expect
+      payload[field] = val ? addBaseIndent(val) : null;
     } else {
       payload[field] = val || null;
     }
@@ -2616,6 +2686,89 @@ function buildFullFn(node) {
   const props = (node.input_schema && node.input_schema.properties) ? node.input_schema.properties : {};
   const params = Object.entries(props).map(([k]) => k).join(', ');
   return `def _${node.name}_impl(${params}) -> dict:\n${node.implementation}`;
+}
+
+// ── Indent helpers ─────────────────────────────────────────────────────────────
+// Server/compiler stores implementation with 4-space base indent.
+// Editor shows it without that base indent so users don't have to maintain it.
+
+function stripBaseIndent(code) {
+  if (!code) return '';
+  const lines = code.split('\n');
+  // Find min indentation of non-empty lines
+  const nonEmpty = lines.filter(l => l.trim().length > 0);
+  if (nonEmpty.length === 0) return code;
+  const minIndent = Math.min(...nonEmpty.map(l => l.match(/^(\s*)/)[1].length));
+  if (minIndent === 0) return code;
+  return lines.map(l => l.slice(minIndent)).join('\n');
+}
+
+function addBaseIndent(code) {
+  if (!code) return '';
+  return code.split('\n').map(l => l.trim() ? '    ' + l : '').join('\n');
+}
+
+// ── Per-skill retry (HITL-2) ───────────────────────────────────────────────────
+async function retrySkill(nodeId) {
+  const ta = document.getElementById('retry-ta-' + nodeId);
+  const btn = document.getElementById('retry-btn-' + nodeId);
+  const statusEl = document.getElementById('retry-status-' + nodeId);
+  const feedback = ta ? ta.value.trim() : '';
+
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Retrying…';
+
+  try {
+    const r = await fetch(`/retry_skill/${nodeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback: feedback || null }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      if (statusEl) statusEl.textContent = d.detail || 'Retry failed';
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (statusEl) statusEl.textContent = 'Retry queued — page will refresh when done…';
+    // Disable all retry/approve buttons and poll for status change
+    document.querySelectorAll('.btn-retry-skill, #btn-approve-impl, #btn-rollback-impl').forEach(b => {
+      b.disabled = true;
+    });
+    _pollImplRetry(nodeId);
+  } catch (err) {
+    if (statusEl) statusEl.textContent = 'Error: ' + err.message;
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _pollImplRetry(nodeId) {
+  let attempts = 0;
+  const interval = setInterval(async () => {
+    attempts++;
+    try {
+      const r = await fetch('/status');
+      if (!r.ok) return;
+      const { status } = await r.json();
+      if (status && status.startsWith('awaiting_impl_review')) {
+        clearInterval(interval);
+        // Reload the impl grid with fresh data
+        implLoaded = false;
+        loadImplReview(true);
+        toast('Skill re-implemented — review updated.', 'success');
+        // Re-enable buttons
+        const appBtn = document.getElementById('btn-approve-impl');
+        const rbBtn = document.getElementById('btn-rollback-impl');
+        if (appBtn) appBtn.disabled = false;
+        if (rbBtn) rbBtn.disabled = false;
+      } else if (!status.startsWith('retrying_skill')) {
+        // Something else happened (rollback, etc.) — just reload the page
+        clearInterval(interval);
+        setTimeout(() => location.reload(), 500);
+      }
+    } catch {}
+    if (attempts > 120) clearInterval(interval); // ~2 min safety cap
+  }, 1000);
 }
 
 function esc(str) {

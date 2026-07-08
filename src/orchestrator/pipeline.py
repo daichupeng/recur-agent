@@ -35,6 +35,13 @@ class RedecomposeRequest:
     hint: Optional[str]
 
 
+@dataclass
+class RetrySkillRequest:
+    """Carry a per-skill retry request with optional feedback from the UI to the pipeline."""
+    node_id: str
+    feedback: Optional[str]
+
+
 class PipelineEvents:
     """Shared async events between the pipeline and the HITL UI server."""
 
@@ -48,6 +55,8 @@ class PipelineEvents:
         # HITL-2: implementation review (after schema + tool implementation)
         self.approve_impl: asyncio.Event = asyncio.Event()
         self.rollback_impl: asyncio.Event = asyncio.Event()
+        # HITL-2 per-skill retry: queue of RetrySkillRequest
+        self.retry_skill: asyncio.Queue[RetrySkillRequest] = asyncio.Queue()
 
         # HITL-3: UI/interaction review (after the whole tree is finalized)
         self.approve_ui: asyncio.Event = asyncio.Event()
@@ -202,7 +211,7 @@ async def run_pipeline(
             events.rollback_impl.clear()
             logger.info("Implementation ready for review at http://127.0.0.1:8000")
 
-            impl_approved = await _hitl2(events)
+            impl_approved = await _hitl2(events, tree, prompt_engineer, tool_implementor, verified_path)
         if not impl_approved:
             # Roll back to the snapshot taken at the start of THIS layer and retry.
             # current_layer was not advanced, so the snapshot for it still exists.
@@ -342,18 +351,68 @@ async def _hitl1_loop(
         events.status = f"awaiting_review_layer_{tree.current_layer}"
 
 
-async def _hitl2(events: PipelineEvents) -> bool:
-    """HITL-2: implementation review. Returns True if approved, False if rollback."""
-    done, pending = await asyncio.wait(
-        [
-            asyncio.create_task(_wait_event(events.approve_impl)),
-            asyncio.create_task(_wait_event(events.rollback_impl)),
-        ],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-    return events.approve_impl.is_set()
+async def _hitl2(
+    events: PipelineEvents,
+    tree,
+    prompt_engineer,
+    tool_implementor,
+    verified_path,
+) -> bool:
+    """HITL-2: implementation review loop.
+
+    Handles three outcomes:
+    - approve → return True
+    - rollback_impl → return False
+    - retry_skill(node_id, feedback) → re-implement that single skill, save, loop
+
+    Returns True if approved, False if full-layer rollback was requested.
+    """
+    from src.orchestrator.state import ExecType, NodeType
+    while True:
+        done, pending = await asyncio.wait(
+            [
+                asyncio.create_task(_wait_event(events.approve_impl)),
+                asyncio.create_task(_wait_event(events.rollback_impl)),
+                asyncio.create_task(events.retry_skill.get()),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+
+        if events.rollback_impl.is_set():
+            return False
+
+        if events.approve_impl.is_set():
+            return True
+
+        # Per-skill retry request arrived
+        req: RetrySkillRequest = next(t.result() for t in done if not t.cancelled())
+        node = tree.root.find_node_by_id(req.node_id)
+        if node is None:
+            logger.warning("RetrySkill: node %s not found; ignoring.", req.node_id)
+            events.approve_impl.clear()
+            events.rollback_impl.clear()
+            events.status = f"awaiting_impl_review_layer_{tree.current_layer}"
+            continue
+
+        logger.info("Re-implementing skill '%s' (feedback: %s)", node.name, req.feedback or "none")
+        events.status = f"retrying_skill_{node.name}"
+
+        # Clear existing implementation/instruction so it gets regenerated
+        node.implementation = None
+        node.instruction = None
+
+        if node.exec_type == ExecType.LLM_PROMPT:
+            await prompt_engineer.engineer([node], feedback=req.feedback)
+        else:
+            await tool_implementor.implement([node], feedback=req.feedback)
+
+        tree.save_json(verified_path)
+        events.current_tree = tree
+        events.approve_impl.clear()
+        events.rollback_impl.clear()
+        events.status = f"awaiting_impl_review_layer_{tree.current_layer}"
 
 
 async def _hitl_ui(events: PipelineEvents) -> bool:

@@ -6,7 +6,10 @@
       "Bash(python -m py_compile src/ui/templates/dashboard.html)",
       "Bash(python main.py --help)",
       "Bash(python test_hitl1_features.py)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(grep -E '\\\\.\\(py|js|ts|tsx|html\\)$')",
+      "Bash(python -c \"from src.orchestrator.pipeline import PipelineEvents, RetrySkillRequest; print\\('OK'\\)\")",
+      "Bash(python -c \"from src.ui.server import app; print\\('server OK'\\)\")"
     ]
   }
 }

@@ -62,8 +62,14 @@ class PromptEngineerAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(system_prompt=_SYSTEM_PROMPT)
 
-    async def engineer(self, nodes: list[SkillNode]) -> list[SkillNode]:
-        """Generate instruction and session-state wiring for LLM atomic nodes (in-place)."""
+    async def engineer(self, nodes: list[SkillNode], feedback: str | None = None) -> list[SkillNode]:
+        """Generate instruction and session-state wiring for LLM atomic nodes (in-place).
+
+        Args:
+            nodes: Nodes to engineer prompts for.
+            feedback: Optional human feedback for per-skill retry (HITL-2). When provided,
+                      it is appended to the user prompt so the LLM can address the concern.
+        """
         if not nodes:
             return nodes
 
@@ -80,6 +86,8 @@ class PromptEngineerAgent(BaseAgent):
             "Generate instructions and session-state wiring for these LLM atomic nodes:\n"
             + json.dumps(node_dicts, indent=2)
         )
+        if feedback:
+            user_content += f"\n\nUser feedback (address this in the instruction): {feedback}"
 
         message = await self._call(
             messages=[{"role": "user", "content": user_content}],

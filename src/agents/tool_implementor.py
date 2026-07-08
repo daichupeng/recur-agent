@@ -99,20 +99,26 @@ class ToolImplementorAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(system_prompt=_SYSTEM_PROMPT)
 
-    async def implement(self, nodes: list[SkillNode]) -> list[SkillNode]:
-        """Generate and assign function bodies for tool atomic nodes (in-place)."""
+    async def implement(self, nodes: list[SkillNode], feedback: str | None = None) -> list[SkillNode]:
+        """Generate and assign function bodies for tool atomic nodes (in-place).
+
+        Args:
+            nodes: Nodes to implement.
+            feedback: Optional human feedback for per-skill retry (HITL-2). When provided,
+                      it is appended to the user prompt so the LLM can address the concern.
+        """
         if not nodes:
             return nodes
 
         # Process in batches to avoid overly long prompts
         for batch_start in range(0, len(nodes), _BATCH_SIZE):
             batch = nodes[batch_start : batch_start + _BATCH_SIZE]
-            await self._implement_batch(batch)
+            await self._implement_batch(batch, feedback=feedback)
 
         self.log_usage()
         return nodes
 
-    async def _implement_batch(self, nodes: list[SkillNode]) -> None:
+    async def _implement_batch(self, nodes: list[SkillNode], feedback: str | None = None) -> None:
         node_dicts = [
             {
                 "name": n.name,
@@ -130,6 +136,8 @@ class ToolImplementorAgent(BaseAgent):
             "Generate implementations for these atomic tool nodes:\n"
             + json.dumps(node_dicts, indent=2)
         )
+        if feedback:
+            user_content += f"\n\nUser feedback (address this in your implementation): {feedback}"
 
         message = await self._call(
             messages=[{"role": "user", "content": user_content}],

@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from src.orchestrator.pipeline import PipelineEvents, RedecomposeRequest
+from src.orchestrator.pipeline import PipelineEvents, RedecomposeRequest, RetrySkillRequest
 from src.orchestrator.state import SkillNode, SkillTree
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -337,6 +337,25 @@ async def rollback_impl() -> dict:
     ev.approve_impl.clear()
     ev.rollback_impl.set()
     return {"ok": True, "action": "rollback_impl"}
+
+
+class RetrySkillPayload(BaseModel):
+    feedback: Optional[str] = None
+
+
+@app.post("/retry_skill/{node_id}")
+async def retry_skill(node_id: str, payload: RetrySkillPayload) -> dict:
+    """Request per-skill retry during HITL-2 without rolling back the whole layer."""
+    ev = _require_events()
+    if not ev.status.startswith("awaiting_impl_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"No implementation review in progress (status={ev.status})",
+        )
+    await ev.retry_skill.put(
+        RetrySkillRequest(node_id=node_id, feedback=payload.feedback)
+    )
+    return {"ok": True, "node_id": node_id}
 
 
 # ── HITL-3: UI / interaction review ──────────────────────────────────────────
