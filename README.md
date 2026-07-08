@@ -35,6 +35,7 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         v
   +------------------------------------------+
   | Decomposer Agent  (claude-haiku)         |
+  |  inject skill_lib context                |
   |  classify each non-atomic node:          |
   |    COMPOSITE -> draft 2-5 sub-skills,    |
   |                 assign composition_type: |
@@ -46,6 +47,8 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   |                   DETERMINISTIC_CODE     |
   |                   EXTERNAL_API           |
   |                   LLM_PROMPT             |
+  |                 (pre-fill from skill_lib  |
+  |                  if matching found)      |
   +------------------------------------------+
         |
         v
@@ -164,17 +167,49 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   +------------------------------------------+
         |
         v
-  +------------------------------------------+    import     +--------------------+
-  | Verify-and-Repair  (subprocess, up to x3)|   passes  -> | output/             |
-  |  python -c "import run"                  |              | {project_name}/     |
-  |  on failure:                             |              | (ADK project)       |
-  |    parse traceback -> atomics/{x}.py     |              +---------------------+
+  +------------------------------------------+
+  | Verify-and-Repair  (subprocess, up to x3)|
+  |  python -c "import run"                  |
+  |  on failure:                             |
+  |    +-----------------------------+       |
+  |    | Debug Agent (claude-haiku) |       |
+  |    | analyze traceback:         |       |
+  |    |  - parse error location    |       |
+  |    |  - identify root cause     |       |
+  |    |  - generate patch code     |       |
+  |    +-----------------------------+       |
   |    clear node.implementation             |
-  |    re-call Tool Implementor (that node)  |
+  |    apply DebugAgent's patch              |
   |    rewrite file -> retry import          |
   |  after x3 failures: surface in UI status |
   +------------------------------------------+
+        |
+        v
+     import success? ----yes----> +--------------------+
+        |                         | output/            |
+        no                        | {project_name}/    |
+        |                         | (ADK project)      |
+        +-- surface error in UI   +--------------------+
+             + save debug logs
 ```
+
+---
+
+## Skill Library (skill_lib)
+
+**recur-agent** maintains a cross-project skill library that captures fully-hydrated atomic skills:
+
+After each layer is approved (HITL-2), the pipeline saves every completed atomic node to `skill_lib/{name}.md`:
+- Full node metadata (exec_type, input/output schema, implementation)
+- Instruction text (for LLM_PROMPT nodes)
+- Dependencies and required env vars
+
+On subsequent projects, the **Decomposer** injects skill_lib context into its prompt:
+- When decomposing a new node, the model sees matching skills from the library
+- Pre-filled children allow the decomposer to skip redundant discovery
+- Human can still override; nothing is auto-accepted
+
+**Compilation**: The compiler scans the tree for `skill_lib_ref` markers and copies referenced SKILL.md files into the generated ADK project's `skill_lib/` directory, with a `skill_reader.py` utility to load them.
 
 ---
 
@@ -196,14 +231,16 @@ Everything else is **composite** and will be further decomposed.
 
 ### Platform Engine (this repo)
 Uses the **Anthropic SDK** for internal agents:
-- [src/agents/decomposer.py](src/agents/decomposer.py) — classifies and expands nodes; enforces ADK composition rules in system prompt
+- [src/agents/decomposer.py](src/agents/decomposer.py) — classifies and expands nodes; enforces ADK composition rules in system prompt; injects skill_lib context for pre-filling from reusable library
 - [src/agents/complexity_reviewer.py](src/agents/complexity_reviewer.py) — flags over-split or structurally odd decompositions
 - [src/agents/schema_architect.py](src/agents/schema_architect.py) — hydrates I/O JSON Schema for every unhydrated atomic in the tree
 - [src/agents/prompt_engineer.py](src/agents/prompt_engineer.py) — writes ADK session-state-aware instructions for LLM_PROMPT nodes
 - [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; prefers domain client libraries over raw HTTP; mandates `os.environ` for credentials; uses claude-sonnet-4-6 with syntax validation and retry
-- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations
-- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with two HITL checkpoints and per-node re-decompose
-- [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection
+- [src/agents/debug.py](src/agents/debug.py) — analyzes failed import traces, auto-repair failures, and generates patch code for broken implementations
+- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; copies referenced skill_lib files into output
+- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with two HITL checkpoints and per-node re-decompose; saves fully-hydrated atomics to skill_lib after each approved layer
+- [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection; real-time job status polling + debug logs
+- [src/skill_lib.py](src/skill_lib.py) — SkillLib class for reading, writing, and searching reusable atomic skills persisted across projects
 
 ### Generated Output (Google ADK)
 The compiler emits a fully self-contained **Google ADK** project:
@@ -288,32 +325,35 @@ recur-agent/
 ├── pyproject.toml                       # Platform dependencies
 ├── .env                                 # ANTHROPIC_API_KEY, GOOGLE_API_KEY, and any
 │                                        # service keys used by generated projects
+├── skill_lib/                           # Shared skill library (SKILL.md files)
+│   └── *.md                             # Persisted atomic skill definitions
 ├── config/
 │   ├── settings.yaml                    # Model, server, output defaults
 │   └── agent_profiles.yaml              # Agent descriptions
 ├── src/
 │   ├── orchestrator/
-│   │   ├── state.py                     # SkillNode, SkillTree (+ required_env_vars),
-│   │   │                                # LayerSnapshot, rollback()
+│   │   ├── state.py                     # SkillNode, SkillTree (+ required_env_vars +
+│   │   │                                # skill_lib_ref), LayerSnapshot, rollback()
 │   │   └── pipeline.py                  # Main async loop (snapshot -> decompose ->
 │   │                                    #   complexity-review -> HITL-1 -> schema ->
 │   │                                    #   prompt-engineer -> tool-implement -> HITL-2 ->
-│   │                                    #   compile -> verify-repair)
+│   │                                    #   compile -> verify-repair); saves atomics to skill_lib
 │   ├── agents/
 │   │   ├── base_agent.py                # Anthropic SDK wrapper + retry + token tracking
-│   │   ├── decomposer.py                # DecomposerAgent (ADK constraints baked into prompt)
+│   │   ├── decomposer.py                # DecomposerAgent (ADK constraints + skill_lib injection)
 │   │   ├── complexity_reviewer.py       # ComplexityReviewAgent
 │   │   ├── schema_architect.py          # SchemaArchitectAgent (batches of 5)
 │   │   ├── prompt_engineer.py           # PromptEngineerAgent (state_reads / state_writes)
 │   │   ├── tool_implementor.py          # ToolImplementorAgent (sonnet, 1 node/call, syntax retry)
-│   │   └── compiler.py                  # CompilerAgent (Jinja2 tree-recursive walk,
-│   │                                    #   dep scan, env-var scan, .env copy)
+│   │   ├── debug.py                     # DebugAgent (analyze import failures, auto-repair)
+│   │   └── compiler.py                  # CompilerAgent (Jinja2 walk, dep/env scan, skill_lib copy)
 │   ├── ui/
-│   │   ├── server.py                    # FastAPI HITL dashboard + sandbox endpoints
+│   │   ├── server.py                    # FastAPI HITL dashboard + sandbox + job polling + debug logs
 │   │   └── templates/
 │   │       ├── index.html               # Landing page
-│   │       ├── dashboard.html           # HITL-1 + HITL-2 review UI + credential form
+│   │       ├── dashboard.html           # HITL-1 + HITL-2 review UI + credential form + debug panel
 │   │       └── chat.html                # Embedded chat for testing generated agents
+│   ├── skill_lib.py                     # SkillLib: read/write/search reusable skill definitions
 │   └── compiler_templates/
 │       ├── adk_tool_stub.py.j2          # def {name}() + FunctionTool + LlmAgent wrapper
 │       ├── adk_llm_agent_stub.py.j2     # LlmAgent with instruction + state wiring
@@ -322,6 +362,9 @@ recur-agent/
 │       ├── adk_loop_agent.py.j2         # LoopAgent orchestrator (max_iterations=10)
 │       ├── adk_coordinator_agent.py.j2  # LlmAgent coordinator with routing instruction
 │       ├── adk_root_orchestrator.py.j2  # run.py (interactive CLI)
+│       ├── frontend_index.html.j2       # Landing page template for UI feature
+│       ├── serve.py.j2                  # Serve.py template for static web serving
+│       ├── ui_manifest.json.j2          # UI manifest template
 │       └── adk_pyproject.toml.j2        # Target project manifest (auto-deps injected)
 └── output/
     └── {project_name}/                  # Generated ADK project
@@ -428,11 +471,12 @@ credential form.
 
 | Agent | Model | Rationale |
 |---|---|---|
-| `DecomposerAgent` | `claude-haiku-4-5` (default) | High-throughput classification; many calls per run |
+| `DecomposerAgent` | `claude-haiku-4-5` (default) | High-throughput classification; skill_lib injection; many calls per run |
 | `ComplexityReviewAgent` | `claude-haiku-4-5` (default) | Light scan; speed over depth |
 | `SchemaArchitectAgent` | `claude-haiku-4-5` (default) | Structured JSON output; fast |
 | `PromptEngineerAgent` | `claude-haiku-4-5` (default) | Instruction writing; moderate complexity |
 | `ToolImplementorAgent` | `claude-sonnet-4-6` | Code generation requires highest quality; 1 node/call |
+| `DebugAgent` | `claude-haiku-4-5` (default) | Analyze import failures; generate patches; lightweight analysis |
 
 ---
 
