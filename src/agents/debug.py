@@ -59,14 +59,49 @@ You will receive:
 - root_symbol: the exported agent variable name (e.g. stock_analyzer_agent)
 - required_env_vars: list of environment variable names the project uses
 
-Your job is to produce a pytest test file that:
-1. Imports InMemoryRunner, Content, Part, and load_dotenv from the project.
-2. Creates a session and runs the root agent with a single realistic user message.
-3. Asserts that a non-empty text response is returned.
-4. Uses `pytest.mark.asyncio` + `async def test_...`.
-5. Calls `load_dotenv()` at module level so API keys are loaded.
-6. Adds `sys.path.insert(0, str(Path(__file__).parent))` at the top so imports work.
-7. Keeps the test short — one happy-path smoke test, no edge cases.
+Your job is to produce a pytest test file. Follow these rules EXACTLY:
+
+IMPORTS:
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+import pytest
+from dotenv import load_dotenv
+from google.adk.runners import InMemoryRunner
+from google.genai.types import Content, Part
+
+load_dotenv()
+```
+
+CRITICAL API RULES — the google-genai library uses CONSTRUCTORS, not class methods:
+- CORRECT:   Part(text="some text")
+- WRONG:     Part.from_text("some text")   ← DO NOT USE THIS
+- CORRECT:   Content(role="user", parts=[Part(text="hello")])
+- WRONG:     Content.from_text(...)        ← DO NOT USE THIS
+
+TEST PATTERN:
+```python
+@pytest.mark.asyncio
+async def test_<name>():
+    runner = InMemoryRunner(agent=root_agent, app_name=APP_NAME)
+    session = await runner.session_service.create_session(
+        app_name=APP_NAME, user_id=USER_ID
+    )
+    message = Content(role="user", parts=[Part(text="<realistic input>")])
+    responses = []
+    async for event in runner.run_async(
+        user_id=USER_ID,
+        session_id=session.id,
+        new_message=message,
+    ):
+        if event.is_final_response() and event.content and event.content.parts:
+            for part in event.content.parts:
+                if part.text:
+                    responses.append(part.text)
+    assert responses, "Agent returned no text response"
+```
 
 Also produce a one-sentence `test_input` — the realistic user message to send to the agent (e.g. "Analyze AAPL").
 
@@ -124,6 +159,7 @@ class DebugAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(system_prompt=_SYSTEM_TEST_GEN)
         self._patch_agent = _PatchAgent()
+        self._test_patch_agent = _TestPatchAgent()
         self._compiler = CompilerAgent()
 
     # ------------------------------------------------------------------
@@ -171,6 +207,7 @@ class DebugAgent(BaseAgent):
             return result
 
         # ── 4. Debug loop ──────────────────────────────────────────────────
+        consecutive_unpatched = 0
         for iteration in range(1, MAX_ITERATIONS + 1):
             result.iterations = iteration
             logger.info("[debug] Running pytest (iteration %d/%d) …", iteration, MAX_ITERATIONS)
@@ -186,11 +223,17 @@ class DebugAgent(BaseAgent):
             logger.warning("[debug] Tests failed (iteration %d). Output:\n%s", iteration, output[-3000:])
             result.errors.append(output[-2000:])
 
-            # Try to identify and repair the offending node
-            patched = await self._patch_from_error(output, project_dir, tree)
-            if not patched:
-                logger.warning("[debug] Could not identify a repairable node from error output.")
-                break
+            patched = await self._patch_from_error(output, project_dir, tree, test_file)
+            if patched:
+                consecutive_unpatched = 0
+            else:
+                consecutive_unpatched += 1
+                logger.warning(
+                    "[debug] No repair made (consecutive unpatched: %d).", consecutive_unpatched
+                )
+                if consecutive_unpatched >= 2:
+                    logger.warning("[debug] Stopping after 2 consecutive unrepaired failures.")
+                    break
 
         return result
 
@@ -308,6 +351,9 @@ class DebugAgent(BaseAgent):
         # Always inject the test_input into the code if the placeholder exists
         test_code = test_code.replace("__TEST_INPUT__", test_input if "test_input" in dir() else "Hello")
 
+        # Sanitize known ADK API misuses that LLMs frequently generate
+        test_code = _sanitize_test_code(test_code)
+
         # Ensure pytest-asyncio is added to pyproject if missing
         await self._ensure_pytest_deps(project_dir)
 
@@ -369,28 +415,52 @@ class DebugAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _patch_from_error(
-        self, error_output: str, project_dir: Path, tree: SkillTree
+        self, error_output: str, project_dir: Path, tree: SkillTree, test_file: Path | None = None
     ) -> bool:
-        """Identify the failing atomic node and patch it. Returns True if patched."""
+        """Identify the failing atomic node or test file and patch it. Returns True if patched."""
+
+        # ── Priority 0: deterministic sanitize of the test file ───────────────
+        # Catches known API misuses (Part.from_text etc.) without an LLM call.
+        if test_file is not None and test_file.exists():
+            original = test_file.read_text()
+            sanitized = _sanitize_test_code(original)
+            if sanitized != original:
+                test_file.write_text(sanitized)
+                logger.info("[debug] Deterministic sanitize fixed test file.")
+                return True
+
+        # ── Priority 1: atomic node repair ────────────────────────────────────
         node = self._identify_failing_node(error_output, project_dir, tree)
-        if node is None:
-            return False
+        if node is not None:
+            logger.info("[debug] Patching node '%s' …", node.name)
+            new_impl = await self._patch_agent.patch(node, error_output)
+            if not new_impl:
+                logger.warning("[debug] Patch agent returned nothing for '%s'.", node.name)
+                # Fall through to test repair below
+            else:
+                node.implementation = new_impl
+                atomics_dir = project_dir / "atomics"
+                try:
+                    self._compiler._compile_atomic(node, atomics_dir)  # type: ignore[attr-defined]
+                    logger.info("[debug] Patched and recompiled '%s'.", node.name)
+                    return True
+                except ValueError as exc:
+                    logger.error("[debug] Recompile after patch failed for '%s': %s", node.name, exc)
+                    # Fall through to test repair below
 
-        logger.info("[debug] Patching node '%s' …", node.name)
-        new_impl = await self._patch_agent.patch(node, error_output)
-        if not new_impl:
-            return False
+        # ── Priority 2: LLM rewrite of the test file ──────────────────────────
+        if test_file is not None and test_file.exists():
+            logger.info("[debug] Attempting LLM test-file repair …")
+            new_test = await self._test_patch_agent.patch(
+                test_file.read_text(), error_output
+            )
+            if new_test:
+                new_test = _sanitize_test_code(new_test)
+                test_file.write_text(new_test)
+                logger.info("[debug] Rewrote test file after LLM repair.")
+                return True
 
-        node.implementation = new_impl
-        # Re-render the atomic file
-        atomics_dir = project_dir / "atomics"
-        try:
-            self._compiler._compile_atomic(node, atomics_dir)  # type: ignore[attr-defined]
-            logger.info("[debug] Patched and recompiled '%s'.", node.name)
-            return True
-        except ValueError as exc:
-            logger.error("[debug] Recompile after patch failed for '%s': %s", node.name, exc)
-            return False
+        return False
 
     def _identify_failing_node(
         self, error_output: str, project_dir: Path, tree: SkillTree
@@ -468,6 +538,147 @@ class _PatchAgent(BaseAgent):
             return impl if impl else None
         except Exception as exc:
             logger.error("[debug] Patch LLM call failed for '%s': %s", node.name, exc)
+            return None
+
+
+# ------------------------------------------------------------------
+# Test code sanitizer — fixes known LLM API misuses deterministically
+# ------------------------------------------------------------------
+
+def _extract_call_arg(code: str, pos: int) -> str:
+    """Return the substring inside the outermost parentheses starting at `pos`.
+
+    `pos` must point to the opening '('.  Handles nested parens and quoted strings.
+    Returns the inner content (without the enclosing parens) or "" on parse error.
+    """
+    assert code[pos] == "("
+    depth = 0
+    in_str: str | None = None
+    start = pos + 1
+    i = pos
+    while i < len(code):
+        ch = code[i]
+        if in_str:
+            if ch == "\\" and in_str != "`":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+        else:
+            if ch in ('"', "'"):
+                in_str = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return code[start:i]
+        i += 1
+    return ""
+
+
+def _sanitize_test_code(code: str) -> str:
+    """Fix common google-genai API misuses emitted by LLMs.
+
+    Uses a balanced-paren scanner so nested parens (e.g. Part.from_text(
+    "Find the most fitting poem sentence(s)")) are handled correctly.
+    """
+    # --- Part.from_text(<arg>) → Part(text=<arg>) ---
+    # In google-genai 2.x, Part.from_text is keyword-only (text=...); LLMs often
+    # call it positionally. Rewrite to the Part(text=...) constructor. If the arg
+    # is already `text=...`, keep it as-is to avoid `Part(text=text=...)`.
+    result = []
+    search_from = 0
+    for m in re.finditer(r'Part\.from_text\(', code):
+        result.append(code[search_from:m.start()])
+        arg = _extract_call_arg(code, m.end() - 1)
+        inner = arg if _arg_is_keyword(arg, "text") else f"text={arg}"
+        result.append(f"Part({inner})")
+        search_from = m.end() + len(arg) + 1  # skip past the closing ')'
+    result.append(code[search_from:])
+    code = "".join(result)
+
+    # --- Content.from_text(<arg>) → Content(role="user", parts=[Part(text=<arg>)]) ---
+    result = []
+    search_from = 0
+    for m in re.finditer(r'Content\.from_text\(', code):
+        result.append(code[search_from:m.start()])
+        arg = _extract_call_arg(code, m.end() - 1)
+        inner = arg if _arg_is_keyword(arg, "text") else f"text={arg}"
+        result.append(f'Content(role="user", parts=[Part({inner})])')
+        search_from = m.end() + len(arg) + 1
+    result.append(code[search_from:])
+    code = "".join(result)
+
+    return code
+
+
+def _arg_is_keyword(arg: str, name: str) -> bool:
+    """True if `arg` already opens with the keyword `name=` (not `name==` / `name>=`)."""
+    stripped = arg.lstrip()
+    if not stripped.startswith(f"{name}="):
+        return False
+    after = stripped[len(name) + 1:]
+    return not after.startswith("=")  # guard against `text==` comparisons
+
+
+# ------------------------------------------------------------------
+# Agent that rewrites a broken test file given its error output
+# ------------------------------------------------------------------
+
+_SYSTEM_TEST_PATCH = """You are a senior Python test engineer debugging a pytest smoke test for a Google ADK project.
+
+You will receive:
+- current_test_code: the full content of the broken test file
+- error_output: the pytest / traceback output showing what failed
+
+Your job: produce a corrected version of the entire test file.
+
+CRITICAL API RULES — the google-genai library uses CONSTRUCTORS, not class methods:
+- CORRECT:   Part(text="some text")
+- WRONG:     Part.from_text("some text")   ← DO NOT USE THIS
+- CORRECT:   Content(role="user", parts=[Part(text="hello")])
+- WRONG:     Content.from_text(...)        ← DO NOT USE THIS
+
+Return JSON: {"test_code": "<full corrected test file>", "explanation": "<one-line summary of fix>"}
+"""
+
+_TEST_PATCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "test_code": {"type": "string"},
+        "explanation": {"type": "string"},
+    },
+    "required": ["test_code", "explanation"],
+    "additionalProperties": False,
+}
+
+
+class _TestPatchAgent(BaseAgent):
+    """Rewrites a broken smoke-test file given the pytest error output."""
+
+    MODEL = "claude-sonnet-4-6"
+    MAX_TOKENS = 8000
+
+    def __init__(self) -> None:
+        super().__init__(system_prompt=_SYSTEM_TEST_PATCH)
+
+    async def patch(self, current_test_code: str, error_output: str) -> str | None:
+        payload = {
+            "current_test_code": current_test_code,
+            "error_output": error_output[-4000:],
+        }
+        try:
+            message = await self._call(
+                messages=[{"role": "user", "content": json.dumps(payload, indent=2)}],
+                output_schema=_TEST_PATCH_SCHEMA,
+            )
+            data = json.loads(_find_text_block(message).text)
+            explanation = data.get("explanation", "")
+            logger.info("[debug] Test patch explanation: %s", explanation)
+            return data.get("test_code") or None
+        except Exception as exc:
+            logger.error("[debug] Test patch LLM call failed: %s", exc)
             return None
 
 

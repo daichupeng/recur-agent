@@ -1,4 +1,5 @@
 .venv
+output
 __pycache__
 *.py[cod]
 *.pyo

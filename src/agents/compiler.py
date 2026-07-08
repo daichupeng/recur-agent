@@ -11,7 +11,7 @@ from typing import Any, NamedTuple
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from src.orchestrator.state import CompositionType, ExecType, NodeType, SkillNode, SkillTree
+from src.orchestrator.state import CompositionType, ExecType, NodeType, NodeVisibility, SkillNode, SkillTree
 from src.skill_lib import SkillLib
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,50 @@ def _collect_required_env_vars(tree: SkillTree) -> list[str]:
     return sorted(seen)
 
 
+def _validate_tree_for_compile(tree: SkillTree) -> None:
+    """Ensure every node is fully resolved before compilation.
+
+    Raises ValueError with a consolidated list of problems so the pipeline can
+    surface an actionable message instead of a cryptic Jinja/template crash
+    (e.g. "'None' has no attribute 'get'" when input_schema is None).
+    """
+    problems: list[str] = []
+
+    for node in tree.root.topological_order():
+        if node.node_type == NodeType.UNKNOWN:
+            problems.append(f"'{node.name}': unresolved node_type (never classified)")
+            continue
+
+        if node.node_type == NodeType.COMPOSITE:
+            if node.composition_type is None:
+                problems.append(f"'{node.name}': composite node has no composition_type")
+            if not node.children:
+                problems.append(f"'{node.name}': composite node has no children")
+            continue
+
+        # ATOMIC — must be fully hydrated
+        if node.exec_type is None:
+            problems.append(f"'{node.name}': atomic node has no exec_type")
+            continue
+        if node.input_schema is None or node.output_schema is None:
+            problems.append(f"'{node.name}': atomic node missing input/output schema (not hydrated)")
+        if node.exec_type == ExecType.LLM_PROMPT:
+            if not node.instruction:
+                problems.append(f"'{node.name}': LLM atomic has no instruction (prompt engineering skipped)")
+        else:
+            if not node.implementation:
+                problems.append(f"'{node.name}': tool atomic has no implementation (implementation skipped)")
+
+    if problems:
+        detail = "\n  - ".join(problems)
+        raise ValueError(
+            f"Cannot compile '{tree.project_name}': {len(problems)} node(s) are not "
+            f"fully implemented:\n  - {detail}\n"
+            "This usually means the decomposition/implementation pipeline advanced past "
+            "a layer without hydrating its atomics. Re-run the pipeline with a fresh blueprint."
+        )
+
+
 def _indent_body(body: str) -> str:
     """Jinja2 filter: ensure implementation body has exactly 4-space base indent.
 
@@ -165,6 +209,11 @@ class CompilerAgent:
 
     def compile(self, tree: SkillTree, output_dir: Path, skill_lib: SkillLib | None = None) -> Path:
         """Write the Google ADK project to output_dir/{project_name}/."""
+        # Fail fast with a clear message if the tree still has unresolved or
+        # unhydrated nodes — otherwise the Jinja templates crash deep inside
+        # with opaque errors like "'None' has no attribute 'get'".
+        _validate_tree_for_compile(tree)
+
         project_dir = output_dir / tree.project_name
         atomics_dir = project_dir / "atomics"
         orchestrators_dir = project_dir / "orchestrators"
@@ -177,6 +226,18 @@ class CompilerAgent:
         # Normalise all names to valid Python identifiers before compilation.
         for node in tree.root.topological_order():
             node.name = _snake_name(node.name)
+
+        # ADK enforces a single-parent rule: an agent object may only appear in one
+        # sub_agents list. If the blueprint contains the same node name under multiple
+        # parents (duplicate subtrees), rename each occurrence after the first so each
+        # gets its own Python file and a distinct ADK agent name.
+        _seen_names: dict[str, int] = {}
+        for node in tree.root.topological_order():
+            if node.name in _seen_names:
+                _seen_names[node.name] += 1
+                node.name = f"{node.name}_{_seen_names[node.name]}"
+            else:
+                _seen_names[node.name] = 0
 
         root_symbol = self._compile_node(tree.root, atomics_dir, orchestrators_dir)
 
@@ -215,6 +276,11 @@ class CompilerAgent:
             '__all__ = ["root_agent"]\n'
         )
         (project_dir / "agent.py").write_text(agent_entry)
+
+        # Generated frontend + interaction contract (only when the UI Designer ran).
+        # Legacy trees (ui_spec is None) skip this entirely and compile as before.
+        if tree.ui_spec is not None:
+            self._compile_frontend(tree, project_dir)
 
         # Scan implementations for third-party packages and required env vars
         third_party_deps = _collect_third_party_deps(tree)
@@ -304,6 +370,60 @@ class CompilerAgent:
         logger.info("Wrote skill_reader.py and copied %d skill(s) to %s.", len(referenced), dest_lib)
 
     # ------------------------------------------------------------------
+    # Generated frontend + interaction contract
+    # ------------------------------------------------------------------
+
+    def _compile_frontend(self, tree: SkillTree, project_dir: Path) -> None:
+        """Emit web/index.html, web/ui_manifest.json, and serve.py from tree.ui_spec.
+
+        user_facing_agents is computed from node.visibility using the already
+        snake_cased node.name — that value equals the ADK LlmAgent name, which is
+        exactly the `event.author` string the frontend filters on at runtime.
+        """
+        ui = tree.ui_spec
+        assert ui is not None
+
+        user_facing_agents = [
+            node.name
+            for node in tree.root.topological_order()
+            if node.visibility == NodeVisibility.USER_FACING
+        ]
+
+        web_dir = project_dir / "web"
+        web_dir.mkdir(exist_ok=True)
+
+        manifest_tmpl = self._env.get_template("ui_manifest.json.j2")
+        manifest = manifest_tmpl.render(
+            project_name=tree.project_name,
+            title=ui.title,
+            tagline=ui.tagline,
+            inputs=[i.value for i in ui.inputs],
+            accept_mime_types=ui.accept_mime_types,
+            output_renderers=[r.value for r in ui.output_renderers],
+            example_prompts=ui.example_prompts,
+            user_facing_agents=user_facing_agents,
+        )
+        # Validate the rendered manifest is well-formed JSON before writing.
+        json.loads(manifest)
+        (web_dir / "ui_manifest.json").write_text(manifest)
+
+        frontend_tmpl = self._env.get_template("frontend_index.html.j2")
+        (web_dir / "index.html").write_text(frontend_tmpl.render())
+
+        serve_tmpl = self._env.get_template("serve.py.j2")
+        serve_code = serve_tmpl.render(project_name=tree.project_name)
+        ast.parse(serve_code)  # fail loudly if the template ever produces bad Python
+        (project_dir / "serve.py").write_text(serve_code)
+
+        logger.info(
+            "Compiled frontend for %s (inputs=%s, renderers=%s, user_facing=%s)",
+            tree.project_name,
+            [i.value for i in ui.inputs],
+            [r.value for r in ui.output_renderers],
+            user_facing_agents,
+        )
+
+    # ------------------------------------------------------------------
     # Recursive compiler core
     # ------------------------------------------------------------------
 
@@ -372,7 +492,7 @@ class CompilerAgent:
 
         template_name = _COMPOSITE_TEMPLATES[node.composition_type]
         tmpl = self._env.get_template(template_name)
-        code = tmpl.render(node=node, child_imports=child_imports)
+        code = tmpl.render(node=node, child_imports=child_imports, gemini_model=_DEFAULT_GEMINI_MODEL)
         (orchestrators_dir / f"{node.name}.py").write_text(code)
         logger.debug("Compiled composite (%s): %s", node.composition_type, node.name)
         return f"{node.name}_agent"

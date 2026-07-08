@@ -3,14 +3,22 @@
 # For production deployment, wrap this tool inside an ADK Code Executor or
 # GKE/gVisor sandbox (AgentEngineCodeExecutor) to jail arbitrary code execution
 # and external API calls from the host environment.
+{%- set is_media = node.output_media_types %}
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
+{%- if is_media %}
+from google.adk.tools import ToolContext
+from google.genai import types  # noqa: F401  (used by save_artifact in the body)
+{%- endif %}
 
 
-def {{ node.name }}(
+{% if is_media %}async {% endif %}def {{ node.name }}(
 {%- for param_name, param_schema in (node.input_schema.get("properties") or {}).items() %}
     {{ param_name }}: {{ param_schema | pydantic_type }},
 {%- endfor %}
+{%- if is_media %}
+    tool_context: ToolContext,
+{%- endif %}
 ) -> dict:
     """{{ node.description }}
 
@@ -18,6 +26,11 @@ def {{ node.name }}(
 {%- for param_name, param_schema in (node.input_schema.get("properties") or {}).items() %}
         {{ param_name }}: {{ param_schema.get("description", param_name) }}
 {%- endfor %}
+{%- if is_media %}
+
+    Emits an artifact ({{ node.output_media_types | join(", ") }}) via
+    tool_context.save_artifact; the returned dict includes `artifact_filename`.
+{%- endif %}
 
     Returns:
         dict: {{ node.output_schema | schema_summary }}

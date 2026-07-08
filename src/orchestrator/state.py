@@ -30,6 +30,29 @@ class CompositionType(str, Enum):
     LLM_COORDINATOR = "LLM_COORDINATOR"  # LlmAgent decides which child to invoke
 
 
+class InputAffordance(str, Enum):
+    """User input modalities the generated frontend can offer. TEXT is always available."""
+    TEXT = "TEXT"                # free-text prompt box
+    FILE_UPLOAD = "FILE_UPLOAD"  # arbitrary file → inline_data Blob
+    IMAGE_UPLOAD = "IMAGE_UPLOAD"  # image file / paste → image/* Blob
+
+
+class OutputRenderer(str, Enum):
+    """How the generated frontend renders agent outputs."""
+    TEXT = "TEXT"                    # plain text bubble (default fallback)
+    MARKDOWN = "MARKDOWN"            # rich markdown (headings, tables, lists)
+    TABLE = "TABLE"                  # structured tabular data
+    IMAGE = "IMAGE"                  # inline image artifact
+    FILE_DOWNLOAD = "FILE_DOWNLOAD"  # download link for a file artifact
+    CODE = "CODE"                    # syntax-highlighted code block
+
+
+class NodeVisibility(str, Enum):
+    """Whether a node's agent output is shown to the end user in the generated frontend."""
+    USER_FACING = "user_facing"  # this agent's output is shown to the user
+    INTERNAL = "internal"        # hidden; intermediate/pipeline agent
+
+
 class SkillNode(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
@@ -49,6 +72,8 @@ class SkillNode(BaseModel):
     state_writes: list[str] = Field(default_factory=list)   # ADK session state keys this node writes
     instruction: Optional[str] = None  # Set by PromptEngineerAgent; engineered system prompt for LLM agents
     skill_lib_ref: Optional[str] = None  # Name of the skill_lib entry this node was sourced from
+    visibility: NodeVisibility = NodeVisibility.INTERNAL  # Set by UIDesignerAgent; governs frontend display
+    output_media_types: list[str] = Field(default_factory=list)  # MIME types this node emits as artifacts; [] = text-only
 
     def get_nodes_at_depth(self, target_depth: int) -> list["SkillNode"]:
         """Return all nodes (including self) at the given depth."""
@@ -84,6 +109,22 @@ class LayerSnapshot(BaseModel):
     root_snapshot: dict[str, Any]  # root.model_dump() deep copy
 
 
+class UISpec(BaseModel):
+    """Frontend/interaction contract for the generated product.
+
+    Selected by UIDesignerAgent from the interaction catalog (see
+    src/interaction_catalog.py) after the tree is finalized; overridable in HITL-3.
+    A tree with ui_spec=None compiles exactly as before (text-only CLI + adk web).
+    """
+    title: str
+    tagline: str = ""
+    inputs: list[InputAffordance] = Field(default_factory=lambda: [InputAffordance.TEXT])
+    output_renderers: list[OutputRenderer] = Field(default_factory=lambda: [OutputRenderer.TEXT])
+    example_prompts: list[str] = Field(default_factory=list)
+    user_facing_nodes: list[str] = Field(default_factory=list)  # node NAMES marked user_facing
+    accept_mime_types: list[str] = Field(default_factory=list)  # e.g. ["image/*", "application/pdf"]
+
+
 class SkillTree(BaseModel):
     project_name: str
     requirement: str
@@ -91,6 +132,7 @@ class SkillTree(BaseModel):
     current_layer: int = 0
     history: list[LayerSnapshot] = Field(default_factory=list)
     required_env_vars: list[str] = Field(default_factory=list)
+    ui_spec: Optional[UISpec] = None  # None → back-compat: no generated frontend
 
     def snapshot_current_layer(self) -> None:
         """Capture the tree state before decomposing current_layer."""

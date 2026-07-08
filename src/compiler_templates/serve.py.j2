@@ -1,0 +1,59 @@
+"""{{ project_name }} — self-contained server (ADK API + generated frontend).
+
+Serves both the Google ADK API (/run_sse, /apps/... artifact routes) and the
+generated manifest-driven frontend (web/) from a single process, so the product
+is portable and deployable on its own.
+
+    uv run python serve.py               # http://localhost:8080
+    uv run python serve.py --port 9000
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).parent.resolve()
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi.staticfiles import StaticFiles
+from google.adk.cli.fast_api import get_fast_api_app
+
+APP_NAME = "{{ project_name }}"
+
+
+def build_app(host: str = "0.0.0.0", port: int = 8080):
+    # Single-agent mode: agents_dir is THIS project dir; ADK derives app_name from
+    # the directory name ("{{ project_name }}"), which the frontend manifest also uses.
+    # web=False so ADK does NOT mount its own Angular UI at "/" — we serve ours instead.
+    app = get_fast_api_app(
+        agents_dir=str(_HERE),
+        web=False,
+        host=host,
+        port=port,
+    )
+
+    # Mount our generated frontend LAST so ADK's explicit API routes (/run_sse,
+    # /apps/...) take precedence over this catch-all static mount.
+    web_dir = _HERE / "web"
+    app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="frontend")
+    return app
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Serve {{ project_name }}.")
+    parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
+    args = parser.parse_args()
+
+    import uvicorn
+    app = build_app(host=args.host, port=args.port)
+    print(f"{{ project_name }} running at http://localhost:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

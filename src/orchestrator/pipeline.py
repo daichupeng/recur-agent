@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from src.agents.decomposer import DecomposerAgent
 from src.agents.prompt_engineer import PromptEngineerAgent
 from src.agents.schema_architect import SchemaArchitectAgent
 from src.agents.tool_implementor import ToolImplementorAgent
+from src.agents.ui_designer import UIDesignerAgent
 from src.orchestrator.state import ExecType, NodeType, SkillNode, SkillTree
 from src.skill_lib import SkillEntry, SkillLib
 
@@ -46,6 +48,10 @@ class PipelineEvents:
         # HITL-2: implementation review (after schema + tool implementation)
         self.approve_impl: asyncio.Event = asyncio.Event()
         self.rollback_impl: asyncio.Event = asyncio.Event()
+
+        # HITL-3: UI/interaction review (after the whole tree is finalized)
+        self.approve_ui: asyncio.Event = asyncio.Event()
+        self.rollback_ui: asyncio.Event = asyncio.Event()
 
         # Updated by the pipeline to tell the UI what it's currently waiting on
         self.current_tree: SkillTree | None = None
@@ -92,6 +98,7 @@ async def run_pipeline(
     schema_architect = SchemaArchitectAgent()
     prompt_engineer = PromptEngineerAgent()
     tool_implementor = ToolImplementorAgent()
+    ui_designer = UIDesignerAgent()
     compiler = CompilerAgent()
 
     raw_path = output_dir / tree.project_name / "blueprint_raw.json"
@@ -144,12 +151,18 @@ async def run_pipeline(
             logger.info("Rollback complete. Retrying layer %d.", tree.current_layer)
             continue
 
+        # Do NOT advance the layer here. The Decomposer classifies the INPUT
+        # nodes in place: a node that turned ATOMIC stays at its current depth,
+        # and only a COMPOSITE node spawns UNKNOWN children one level deeper.
+        # So the atomics that now need schema/impl live at `current_layer`,
+        # not current_layer + 1. We advance only after this layer is fully
+        # implemented and reviewed (see "ADVANCE TO NEXT LAYER" at loop end).
+        events.current_tree = tree
+
         # ── STEP 3: SCHEMA HYDRATION ───────────────────────────────────────
         events.status = f"schema_hydration_layer_{tree.current_layer}"
-        unhydrated = [
-            n for n in tree.root.topological_order()
-            if n.node_type == NodeType.ATOMIC and n.input_schema is None
-        ]
+        layer_atomics = [n for n in tree.get_layer_nodes() if n.node_type == NodeType.ATOMIC]
+        unhydrated = [n for n in layer_atomics if n.input_schema is None]
         if unhydrated:
             logger.info("Running Schema Architect on %d unhydrated atomic nodes...", len(unhydrated))
             await schema_architect.hydrate(unhydrated)
@@ -157,10 +170,8 @@ async def run_pipeline(
         # ── STEP 3b: PROMPT ENGINEERING ────────────────────────────────────
         events.status = f"prompt_engineering_layer_{tree.current_layer}"
         llm_atomics = [
-            n for n in tree.root.topological_order()
-            if n.node_type == NodeType.ATOMIC
-            and n.exec_type == ExecType.LLM_PROMPT
-            and n.instruction is None
+            n for n in layer_atomics
+            if n.exec_type == ExecType.LLM_PROMPT and n.instruction is None
         ]
         if llm_atomics:
             logger.info("Running Prompt Engineer on %d LLM atomic nodes...", len(llm_atomics))
@@ -169,9 +180,8 @@ async def run_pipeline(
         # ── STEP 3c: TOOL IMPLEMENTATION ───────────────────────────────────
         events.status = f"tool_implementation_layer_{tree.current_layer}"
         tool_atomics = [
-            n for n in tree.root.topological_order()
-            if n.node_type == NodeType.ATOMIC
-            and n.exec_type in (ExecType.DETERMINISTIC_CODE, ExecType.EXTERNAL_API, ExecType.OPENSOURCE_LIBRARY)
+            n for n in layer_atomics
+            if n.exec_type in (ExecType.DETERMINISTIC_CODE, ExecType.EXTERNAL_API, ExecType.OPENSOURCE_LIBRARY)
             and n.implementation is None
         ]
         if tool_atomics:
@@ -182,7 +192,7 @@ async def run_pipeline(
         events.current_tree = tree
 
         # ── STEP 4: HITL-2 (implementation review) ────────────────────────
-        all_atomics = [n for n in tree.root.topological_order() if n.node_type == NodeType.ATOMIC]
+        all_atomics = layer_atomics
         if not all_atomics:
             logger.info("No atomic nodes at layer %d — auto-approving implementation review.", tree.current_layer)
             impl_approved = True
@@ -194,7 +204,8 @@ async def run_pipeline(
 
             impl_approved = await _hitl2(events)
         if not impl_approved:
-            # Roll back the whole layer and retry from decompose
+            # Roll back to the snapshot taken at the start of THIS layer and retry.
+            # current_layer was not advanced, so the snapshot for it still exists.
             logger.info("Implementation rollback requested for layer %d.", tree.current_layer)
             events.status = "rolling_back"
             tree.rollback()
@@ -213,7 +224,18 @@ async def run_pipeline(
         tree.save_json(layer_dir / "blueprint_verified.json")
         logger.info("Layer %d artifacts saved to %s", tree.current_layer, layer_dir)
 
+        # ── ADVANCE TO NEXT LAYER ──────────────────────────────────────────
+        # This layer's atomics are now hydrated/implemented and approved. Any
+        # COMPOSITE nodes at this layer spawned UNKNOWN children one level deeper,
+        # which the next iteration will pick up and classify.
         tree.current_layer += 1
+        events.current_tree = tree
+
+    # ── UI DESIGN (whole-tree, once) ─────────────────────────────────────────
+    # Needs the complete tree structure, so it runs after the per-layer loop and
+    # before compile. Selects the frontend/interaction contract and marks which
+    # agents are user-facing and which nodes emit media artifacts.
+    await _design_ui(tree, events, ui_designer, tool_implementor, verified_path)
 
     # ── COMPILE ────────────────────────────────────────────────────────────
     events.status = "compiling"
@@ -332,6 +354,88 @@ async def _hitl2(events: PipelineEvents) -> bool:
     for t in pending:
         t.cancel()
     return events.approve_impl.is_set()
+
+
+async def _hitl_ui(events: PipelineEvents) -> bool:
+    """HITL-3: UI/interaction review. Returns True if approved, False if re-design requested."""
+    done, pending = await asyncio.wait(
+        [
+            asyncio.create_task(_wait_event(events.approve_ui)),
+            asyncio.create_task(_wait_event(events.rollback_ui)),
+        ],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
+    return events.approve_ui.is_set()
+
+
+# ---------------------------------------------------------------------------
+# UI design (HITL-3)
+# ---------------------------------------------------------------------------
+
+async def _design_ui(
+    tree: SkillTree,
+    events: PipelineEvents,
+    ui_designer: UIDesignerAgent,
+    tool_implementor: ToolImplementorAgent,
+    verified_path: Path,
+) -> None:
+    """Select the frontend/interaction contract, re-implement media nodes, HITL-3.
+
+    Loops so that a HITL-3 rollback re-runs the UI Designer (cheap, single call).
+    Set env SKIP_UI_REVIEW=1 to auto-approve (headless / fast runs).
+    """
+    skip_review = bool(os.environ.get("SKIP_UI_REVIEW"))
+
+    while True:
+        events.status = "ui_design"
+        logger.info("Designing frontend/interaction contract for %s …", tree.project_name)
+        await ui_designer.design(tree)
+
+        # Media re-implementation: nodes the designer flagged as media producers need
+        # their tool bodies regenerated so they call save_artifact (see tool_implementor
+        # media mode). Reuses the null-and-reimplement pattern from _repair_from_traceback.
+        media_nodes = [
+            n for n in tree.root.topological_order()
+            if n.node_type == NodeType.ATOMIC
+            and n.output_media_types
+            and n.exec_type in (
+                ExecType.DETERMINISTIC_CODE, ExecType.EXTERNAL_API, ExecType.OPENSOURCE_LIBRARY
+            )
+            and not _implementation_saves_artifact(n.implementation)
+        ]
+        if media_nodes:
+            logger.info(
+                "Re-implementing %d media-producing node(s) with artifact emission…",
+                len(media_nodes),
+            )
+            events.status = "media_implementation"
+            for node in media_nodes:
+                node.implementation = None
+            await tool_implementor.implement(media_nodes)
+
+        tree.save_json(verified_path)
+        events.current_tree = tree
+
+        if skip_review:
+            logger.info("SKIP_UI_REVIEW set — auto-approving UI design.")
+            return
+
+        events.status = "awaiting_ui_review"
+        events.approve_ui.clear()
+        events.rollback_ui.clear()
+        logger.info("UI design ready for review at http://127.0.0.1:8000")
+
+        approved = await _hitl_ui(events)
+        if approved:
+            return
+        logger.info("UI design rollback requested — re-designing.")
+
+
+def _implementation_saves_artifact(impl: Optional[str]) -> bool:
+    """True if a tool body already emits an artifact (avoids double re-implementation)."""
+    return bool(impl) and "save_artifact" in impl
 
 
 # ---------------------------------------------------------------------------

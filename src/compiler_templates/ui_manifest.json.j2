@@ -1,0 +1,15 @@
+{
+  "app_name": {{ project_name | tojson }},
+  "title": {{ title | tojson }},
+  "tagline": {{ tagline | tojson }},
+  "inputs": {{ inputs | tojson }},
+  "accept_mime_types": {{ accept_mime_types | tojson }},
+  "output_renderers": {{ output_renderers | tojson }},
+  "example_prompts": {{ example_prompts | tojson }},
+  "user_facing_agents": {{ user_facing_agents | tojson }},
+  "endpoints": {
+    "create_session": "/apps/{{ project_name }}/users/user/sessions",
+    "run_sse": "/run_sse",
+    "artifact": "/apps/{{ project_name }}/users/user/sessions/{session_id}/artifacts/{filename}/versions/{version}"
+  }
+}

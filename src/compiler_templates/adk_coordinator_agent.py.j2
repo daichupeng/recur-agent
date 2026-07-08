@@ -6,7 +6,7 @@ from {{ imp.module }} import {{ imp.symbol }}
 
 {{ node.name }}_agent = LlmAgent(
     name="{{ node.name }}",
-    model="gemini-2.0-flash",
+    model="{{ gemini_model | default('gemini-3.1-flash-lite') }}",
     description="{{ node.description }}",
     instruction="""{{ node.description }}
 

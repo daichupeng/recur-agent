@@ -5,15 +5,12 @@ import asyncio
 import logging
 import os
 import re
-import shutil
-import stat
 import sys
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -40,6 +37,7 @@ _sandbox: dict = {
     "proc": None,       # subprocess.Popen | None
     "output": [],       # list[str] — accumulated log lines
     "notify": None,     # asyncio.Event — set when new log line added
+    "mode": None,       # "serve" (generated frontend) | "adk_web" (legacy) | None
 }
 
 # ── Debug env-var gate ─────────────────────────────────────────────────────
@@ -82,40 +80,43 @@ async def _run_sandbox(project_path: Path, port: int) -> None:
 
     _sandbox_log(f"▶ Setting up sandbox for {project_path.name}…")
 
-    # Remove any existing .venv so uv always creates a fresh, valid environment.
-    # shutil.rmtree with an onerror handler fixes read-only files/dirs that
-    # would otherwise cause rm -rf to fail with "Directory not empty" on some
-    # filesystems (e.g. Docker overlayfs).
     venv_dir = project_path / ".venv"
-    if venv_dir.exists() or venv_dir.is_symlink():
-        def _force_remove(func, path, _exc):
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-        shutil.rmtree(venv_dir, onerror=_force_remove)
 
     # Pin the venv location so uv ignores any ambient VIRTUAL_ENV in the shell.
     uv_env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(venv_dir)}
 
-    # Install generated project dependencies
+    # Install generated project dependencies. Use --verbose so uv emits lines
+    # while downloading (without a TTY it would otherwise be silent).
     _sandbox_log("▶ Running: uv sync")
     rc = await _stream_subprocess(
-        [sys.executable, "-m", "uv", "sync"],
+        [sys.executable, "-m", "uv", "sync", "--verbose"],
         project_path,
         env=uv_env,
     )
     if rc != 0:
         # Try plain uv if python -m uv fails
         _sandbox_log("  (retrying with bare uv)")
-        rc = await _stream_subprocess(["uv", "sync"], project_path, env=uv_env)
+        rc = await _stream_subprocess(["uv", "sync", "--verbose"], project_path, env=uv_env)
     if rc != 0:
         _sandbox["status"] = "error"
         _sandbox_log(f"✗ uv sync failed (exit {rc})")
         return
 
-    _sandbox_log(f"▶ Starting: uv run adk web . --port {port} --host 0.0.0.0")
+    # Prefer the generated self-contained server (serve.py) when present: it serves
+    # the manifest-driven product frontend AND the ADK API from one process. Legacy
+    # projects (no serve.py) fall back to ADK's generic `adk web` chat UI.
+    serve_py = project_path / "serve.py"
+    if serve_py.exists():
+        launch_cmd = ["uv", "run", "python", "serve.py", "--port", str(port), "--host", "0.0.0.0"]
+        _sandbox["mode"] = "serve"
+        _sandbox_log(f"▶ Starting: uv run python serve.py --port {port} --host 0.0.0.0")
+    else:
+        launch_cmd = ["uv", "run", "adk", "web", ".", "--port", str(port), "--host", "0.0.0.0"]
+        _sandbox["mode"] = "adk_web"
+        _sandbox_log(f"▶ Starting: uv run adk web . --port {port} --host 0.0.0.0")
     try:
         adk_proc = await asyncio.create_subprocess_exec(
-            "uv", "run", "adk", "web", ".", "--port", str(port), "--host", "0.0.0.0",
+            *launch_cmd,
             cwd=str(project_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -129,7 +130,7 @@ async def _run_sandbox(project_path: Path, port: int) -> None:
             _sandbox_log(stripped)
             if "Application startup complete" in stripped or "Uvicorn running" in stripped:
                 _sandbox["status"] = "ready"
-                _sandbox_log(f"✓ Agent chat ready at http://127.0.0.1:{port}")
+                _sandbox_log(f"✓ Ready at http://127.0.0.1:{port}")
                 # Keep draining stdout so the pipe never fills and deadlocks the server
                 asyncio.create_task(_drain_stdout(adk_proc))
                 return
@@ -199,6 +200,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             "current_layer": tree.current_layer if tree else 0,
             "nodes": nodes,
             "tree": tree,
+            "sandbox_project_name": tree.project_name if tree else None,
         },
     )
 
@@ -337,6 +339,97 @@ async def rollback_impl() -> dict:
     return {"ok": True, "action": "rollback_impl"}
 
 
+# ── HITL-3: UI / interaction review ──────────────────────────────────────────
+
+
+@app.post("/approve_ui")
+async def approve_ui() -> dict:
+    """Approve the generated UI/interaction contract (HITL-3) and proceed to compile."""
+    ev = _require_events()
+    if not ev.status.startswith("awaiting_ui_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"No UI review in progress (status={ev.status})",
+        )
+    ev.rollback_ui.clear()
+    ev.approve_ui.set()
+    return {"ok": True, "action": "approved_ui"}
+
+
+@app.post("/rollback_ui")
+async def rollback_ui() -> dict:
+    """Reject the generated UI design (HITL-3); the UI Designer re-runs."""
+    ev = _require_events()
+    if not ev.status.startswith("awaiting_ui_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"No UI review in progress (status={ev.status})",
+        )
+    ev.approve_ui.clear()
+    ev.rollback_ui.set()
+    return {"ok": True, "action": "rollback_ui"}
+
+
+class EditUIPayload(BaseModel):
+    title: Optional[str] = None
+    tagline: Optional[str] = None
+    inputs: Optional[list[str]] = None
+    output_renderers: Optional[list[str]] = None
+    example_prompts: Optional[list[str]] = None
+    user_facing_nodes: Optional[list[str]] = None
+
+
+@app.post("/edit_ui")
+async def edit_ui(payload: EditUIPayload) -> dict:
+    """Manual override of the generated UISpec (no LLM re-run).
+
+    Editing user_facing_nodes also re-syncs each node's `visibility` flag so the
+    compiled frontend's author filter matches the human's choice.
+    """
+    from src.orchestrator.state import (
+        InputAffordance,
+        NodeVisibility,
+        OutputRenderer,
+        UISpec,
+    )
+
+    ev = _require_events()
+    if ev.current_tree is None:
+        raise HTTPException(status_code=404, detail="No active tree")
+    tree = ev.current_tree
+    if tree.ui_spec is None:
+        tree.ui_spec = UISpec(title=tree.project_name)
+    spec = tree.ui_spec
+
+    if payload.title is not None:
+        spec.title = payload.title
+    if payload.tagline is not None:
+        spec.tagline = payload.tagline
+    if payload.inputs is not None:
+        spec.inputs = [InputAffordance(i) for i in payload.inputs if i in InputAffordance._value2member_map_]
+        if InputAffordance.TEXT not in spec.inputs:
+            spec.inputs.insert(0, InputAffordance.TEXT)
+    if payload.output_renderers is not None:
+        spec.output_renderers = [
+            OutputRenderer(r) for r in payload.output_renderers if r in OutputRenderer._value2member_map_
+        ]
+        if OutputRenderer.TEXT not in spec.output_renderers:
+            spec.output_renderers.append(OutputRenderer.TEXT)
+    if payload.example_prompts is not None:
+        spec.example_prompts = payload.example_prompts
+    if payload.user_facing_nodes is not None:
+        all_names = {n.name for n in tree.root.topological_order()}
+        chosen = [n for n in payload.user_facing_nodes if n in all_names]
+        spec.user_facing_nodes = chosen
+        # Re-sync per-node visibility so the compiler's author list matches.
+        for node in tree.root.topological_order():
+            node.visibility = (
+                NodeVisibility.USER_FACING if node.name in chosen else NodeVisibility.INTERNAL
+            )
+
+    return {"ok": True}
+
+
 # ── Debug env-var endpoints ─────────────────────────────────────────────────
 
 
@@ -409,15 +502,17 @@ async def debug_env_provider(missing_names: list[str]) -> dict[str, str]:
 
 class SandboxEnvPayload(BaseModel):
     env_vars: dict[str, str]
+    project_name: Optional[str] = None
+
+
+class SandboxStartPayload(BaseModel):
+    project_name: Optional[str] = None
 
 
 @app.post("/sandbox/env")
 async def sandbox_set_env(payload: SandboxEnvPayload) -> dict:
-    """Write key-value pairs into the compiled project's .env before sandbox launch.
-
-    Values are written to disk only and are never returned after submission.
-    """
-    project_path = _resolve_sandbox_project()
+    """Write key-value pairs into the compiled project's .env before sandbox launch."""
+    project_path = _resolve_sandbox_project(payload.project_name)
     if project_path is None:
         raise HTTPException(status_code=404, detail="No compiled project found.")
     if not payload.env_vars:
@@ -440,16 +535,23 @@ async def sandbox_set_env(payload: SandboxEnvPayload) -> dict:
 
 
 @app.get("/sandbox/required_env")
-async def sandbox_required_env() -> dict:
+async def sandbox_required_env(project_name: Optional[str] = None) -> dict:
     """Return the list of env var names required by the compiled project."""
-    if _events is None or _events.current_tree is None:
-        return {"required": []}
-    tree = _events.current_tree
-    required = tree.required_env_vars if hasattr(tree, "required_env_vars") else []
+    project_path = _resolve_sandbox_project(project_name)
 
-    project_path = _resolve_sandbox_project()
+    # Read required_env_vars from the tree on disk or from the active pipeline.
+    required: list[str] = []
+    if project_path:
+        tree_json = project_path / "blueprint_verified.json"
+        if tree_json.exists():
+            tree = SkillTree.load_json(tree_json)
+            required = tree.required_env_vars if hasattr(tree, "required_env_vars") else []
+    elif _events and _events.current_tree:
+        tree = _events.current_tree
+        required = tree.required_env_vars if hasattr(tree, "required_env_vars") else []
+
     satisfied: list[str] = []
-    missing: list[str] = []
+    missing: list[str] = list(required)
     if project_path:
         env_file = project_path / ".env"
         present: set[str] = set()
@@ -460,45 +562,26 @@ async def sandbox_required_env() -> dict:
                     k, _, v = line.partition("=")
                     if v.strip():
                         present.add(k.strip())
-        for key in required:
-            (satisfied if key in present else missing).append(key)
-    else:
-        missing = list(required)
+        satisfied = [k for k in required if k in present]
+        missing = [k for k in required if k not in present]
 
     return {"required": required, "satisfied": satisfied, "missing": missing}
 
 
 @app.post("/sandbox/start")
-async def sandbox_start() -> dict:
-    """Start the sandbox for the current (done) project, or a named existing project."""
-    # Resolve project path
-    project_path = _resolve_sandbox_project()
+async def sandbox_start(payload: SandboxStartPayload = SandboxStartPayload()) -> dict:
+    """Start the sandbox for a project. Pass project_name in the body, or fall back
+    to the active pipeline run when status is 'done'."""
+    project_path = _resolve_sandbox_project(payload.project_name)
     if project_path is None:
         raise HTTPException(status_code=404, detail="No compiled project found to run.")
 
     if _sandbox["status"] in ("setting_up", "ready"):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Sandbox already running (status={_sandbox['status']})",
-        )
-
-    asyncio.create_task(_run_sandbox(project_path, _SANDBOX_PORT))
-    return {"ok": True, "port": _SANDBOX_PORT}
-
-
-@app.post("/sandbox/start/{project_name}")
-async def sandbox_start_named(project_name: str) -> dict:
-    """Start sandbox for an existing output project by name."""
-    project_path = _get_output_dir() / project_name
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found in output.")
-
-    if _sandbox["status"] in ("setting_up", "ready"):
-        # Stop the previous one first
+        # Stop any running sandbox before starting a new one
         await _sandbox_stop_proc()
 
     asyncio.create_task(_run_sandbox(project_path, _SANDBOX_PORT))
-    return {"ok": True, "project_name": project_name, "port": _SANDBOX_PORT}
+    return {"ok": True, "port": _SANDBOX_PORT}
 
 
 @app.post("/sandbox/stop")
@@ -512,6 +595,7 @@ async def sandbox_status_endpoint() -> dict:
     return {
         "status": _sandbox["status"],
         "port": _sandbox["port"],
+        "mode": _sandbox.get("mode"),
         "ready_url": f"http://localhost:{_sandbox['port']}" if _sandbox["status"] == "ready" else None,
     }
 
@@ -581,6 +665,7 @@ async def project_view(request: Request, project_name: str) -> HTMLResponse:
             "nodes": nodes,
             "tree": tree,
             "tree_endpoint": f"/project/{project_name}/tree",
+            "sandbox_project_name": project_name,
         },
     )
 
@@ -603,12 +688,19 @@ def _get_output_dir() -> Path:
     return Path(__file__).parent.parent.parent / "output"
 
 
-def _resolve_sandbox_project() -> Optional[Path]:
-    """Return the project path for the current pipeline run, if compiled."""
+def _resolve_sandbox_project(project_name: Optional[str] = None) -> Optional[Path]:
+    """Return the project path to use for sandbox operations.
+
+    Resolution order:
+    1. Explicit project_name (from template context or request body).
+    2. Active pipeline run when status == "done".
+    """
+    if project_name:
+        p = _get_output_dir() / project_name
+        return p if p.exists() else None
     if _events and _events.current_tree and _events.status == "done":
         p = _get_output_dir() / _events.current_tree.project_name
-        if p.exists():
-            return p
+        return p if p.exists() else None
     return None
 
 
@@ -629,70 +721,6 @@ async def _sandbox_stop_proc() -> None:
     _sandbox["notify"] = None
 
 
-# ── Chat page + ADK proxy ────────────────────────────────────────────────────
-
-def _adk_base_url() -> str:
-    return f"http://127.0.0.1:{_sandbox['port']}"
-
-
-@app.get("/chat/{project_name}", response_class=HTMLResponse)
-async def chat_page(request: Request, project_name: str) -> HTMLResponse:
-    """Serve the embedded chat UI for a compiled project."""
-    return templates.TemplateResponse(
-        request,
-        "chat.html",
-        {"project_name": project_name},
-    )
-
-
-@app.post("/chat/{project_name}/session")
-async def chat_create_session(project_name: str) -> dict:
-    """Create a new ADK session for this project and return its ID."""
-    url = f"{_adk_base_url()}/apps/{project_name}/users/user/sessions"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(url, json={})
-            r.raise_for_status()
-            return r.json()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Sandbox not running — start it first.")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
-
-
-@app.post("/chat/{project_name}/send")
-async def chat_send(project_name: str, request: Request) -> StreamingResponse:
-    """Proxy a user message to ADK /run_sse and stream events back."""
-    body = await request.json()
-    session_id = body.get("session_id")
-    text = body.get("text", "")
-
-    if not session_id:
-        raise HTTPException(status_code=422, detail="session_id required")
-
-    adk_payload = {
-        "app_name": project_name,
-        "user_id": "user",
-        "session_id": session_id,
-        "new_message": {
-            "role": "user",
-            "parts": [{"text": text}],
-        },
-        "streaming": True,
-    }
-
-    async def stream_events():
-        url = f"{_adk_base_url()}/run_sse"
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream("POST", url, json=adk_payload) as resp:
-                    async for line in resp.aiter_lines():
-                        if line.startswith("data:"):
-                            yield f"{line}\n\n"
-        except httpx.ConnectError:
-            yield 'data: {"error": "Sandbox not running"}\n\n'
-
-    return StreamingResponse(stream_events(), media_type="text/event-stream")
 
 
 class EditPayload(BaseModel):

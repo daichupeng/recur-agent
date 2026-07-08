@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Loading…</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --font: "Inter", system-ui, -apple-system, sans-serif;
+      --mono: "SF Mono", "Fira Code", "Consolas", monospace;
+      --bg: #f7f7f5; --surface: #ffffff; --surface-2: #f9f9f7;
+      --border: #e5e5e3; --border-strong: #d0d0cc;
+      --text-primary: #1a1a18; --text-secondary: #6b6b69; --text-tertiary: #9b9b99;
+      --claude-orange: #da7756; --accent: #d97706;
+      --green: #16a34a; --green-bg: #f0fdf4;
+      --blue: #2563eb; --blue-bg: #eff6ff; --blue-border: #bfdbfe;
+      --red: #dc2626; --red-bg: #fef2f2; --red-border: #fecaca;
+      --radius: 12px; --radius-sm: 8px;
+      --shadow-sm: 0 1px 3px rgba(0,0,0,.06); --shadow-md: 0 4px 12px rgba(0,0,0,.08);
+      --user-bubble: #1a1a18;
+    }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: var(--font); background: var(--bg); color: var(--text-primary);
+      display: grid; grid-template-rows: 56px 1fr; height: 100vh;
+    }
+    .topbar {
+      display: flex; align-items: center; padding: 0 24px;
+      border-bottom: 1px solid var(--border); background: var(--surface);
+      gap: 12px; flex-shrink: 0;
+    }
+    .logo-mark {
+      width: 28px; height: 28px;
+      background: linear-gradient(135deg, var(--claude-orange), var(--accent));
+      border-radius: 7px; display: flex; align-items: center; justify-content: center;
+      font-size: 13px; color: #fff;
+    }
+    .title-wrap { flex: 1; min-width: 0; }
+    .app-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+    .app-tagline { font-size: 12px; color: var(--text-tertiary); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
+    .status-dot.online { background: var(--green); box-shadow: 0 0 0 2px var(--green-bg); }
+    .status-dot.thinking { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+    .status-dot.error { background: var(--red); }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .status-text { font-size: 12px; color: var(--text-tertiary); }
+
+    .chat-wrap { display: flex; flex-direction: column; overflow: hidden; height: 100%; }
+    .messages { flex: 1; overflow-y: auto; padding: 24px 0; display: flex; flex-direction: column; }
+    .msg-row { display: flex; padding: 6px 24px; gap: 12px; animation: fadeIn 0.18s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    .msg-row.user { flex-direction: row-reverse; }
+    .avatar {
+      width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; margin-top: 2px; color: #fff;
+    }
+    .avatar.agent { background: linear-gradient(135deg, var(--claude-orange), var(--accent)); }
+    .avatar.user { background: var(--user-bubble); }
+    .bubble-col { display: flex; flex-direction: column; gap: 4px; max-width: min(680px, 74%); }
+    .msg-row.user .bubble-col { align-items: flex-end; }
+    .sender-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); padding: 0 4px; }
+    .bubble { padding: 11px 15px; border-radius: var(--radius); font-size: 14px; line-height: 1.6; word-break: break-word; }
+    .bubble.agent { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius) var(--radius) var(--radius) 3px; box-shadow: var(--shadow-sm); }
+    .bubble.user { background: var(--user-bubble); color: #f5f5f3; border-radius: var(--radius) var(--radius) 3px var(--radius); }
+    .bubble.error { background: var(--red-bg); border: 1.5px solid var(--red-border); color: var(--red); border-radius: var(--radius); font-size: 13px; }
+    /* markdown */
+    .bubble.agent h1,.bubble.agent h2,.bubble.agent h3 { font-size: 1.05em; margin: 8px 0 4px; }
+    .bubble.agent p { margin: 4px 0; }
+    .bubble.agent ul,.bubble.agent ol { margin: 4px 0 4px 20px; }
+    .bubble.agent pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow-x: auto; margin: 6px 0; }
+    .bubble.agent code { font-family: var(--mono); font-size: 12.5px; }
+    .bubble.agent table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+    .bubble.agent th, .bubble.agent td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
+    .bubble.agent th { background: var(--surface-2); }
+    /* artifacts */
+    .artifact-img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border); margin-top: 6px; display: block; }
+    .artifact-file {
+      display: inline-flex; align-items: center; gap: 8px; margin-top: 6px;
+      padding: 9px 13px; border: 1.5px solid var(--border); border-radius: 8px;
+      background: var(--surface-2); text-decoration: none; color: var(--text-primary);
+      font-size: 13px; font-weight: 500;
+    }
+    .artifact-file:hover { background: var(--bg); }
+    .typing-indicator { display: flex; align-items: center; gap: 4px; padding: 13px 16px; }
+    .typing-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); animation: bounce 1.2s ease-in-out infinite; }
+    .typing-dot:nth-child(2){animation-delay:.2s} .typing-dot:nth-child(3){animation-delay:.4s}
+    @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
+
+    .input-bar { border-top: 1px solid var(--border); background: var(--surface); padding: 14px 24px; flex-shrink: 0; }
+    .attach-row { max-width: 860px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+      padding: 5px 10px; border: 1px solid var(--border); border-radius: 20px;
+      background: var(--surface-2); color: var(--text-secondary);
+    }
+    .chip button { border: none; background: none; cursor: pointer; color: var(--text-tertiary); font-size: 14px; line-height: 1; }
+    .input-row {
+      display: flex; align-items: flex-end; gap: 10px; max-width: 860px; margin: 0 auto;
+      background: var(--bg); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 8px 10px 8px 12px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .input-row:focus-within { border-color: var(--claude-orange); box-shadow: 0 0 0 3px rgba(217,119,86,.1); background: var(--surface); }
+    .icon-btn {
+      width: 34px; height: 34px; flex-shrink: 0; border: none; border-radius: 8px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; background: transparent; color: var(--text-tertiary);
+      align-self: flex-end;
+    }
+    .icon-btn:hover { background: var(--border); color: var(--text-primary); }
+    #msg-input { flex: 1; font-family: var(--font); font-size: 14px; color: var(--text-primary); background: transparent; border: none; outline: none; resize: none; line-height: 1.5; max-height: 140px; padding: 6px 0; }
+    #msg-input::placeholder { color: var(--text-tertiary); }
+    .send-btn { background: linear-gradient(135deg, var(--claude-orange), var(--accent)); color:#fff; }
+    .send-btn:hover:not(:disabled) { opacity:.9; } .send-btn:disabled { opacity:.35; cursor:not-allowed; }
+    .input-hint { text-align: center; font-size: 11px; color: var(--text-tertiary); margin-top: 8px; }
+    .examples { max-width: 860px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+    .example-btn { font-size: 12px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--text-secondary); cursor: pointer; }
+    .example-btn:hover { border-color: var(--claude-orange); color: var(--text-primary); }
+    .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-tertiary); text-align: center; padding: 40px; }
+    .empty-icon { width: 52px; height: 52px; background: linear-gradient(135deg, var(--claude-orange), var(--accent)); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+    .empty-title { font-size: 17px; font-weight: 700; color: var(--text-primary); }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo-mark">✦</div>
+    <div class="title-wrap">
+      <div class="app-title" id="app-title">…</div>
+      <div class="app-tagline" id="app-tagline"></div>
+    </div>
+    <div class="status-dot" id="status-dot"></div>
+    <span class="status-text" id="status-text">Connecting…</span>
+  </div>
+
+  <div class="chat-wrap">
+    <div class="messages" id="messages">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon">✦</div>
+        <div class="empty-title" id="empty-title">Loading…</div>
+        <div id="empty-desc" style="max-width:340px;font-size:13px;color:var(--text-secondary)"></div>
+      </div>
+    </div>
+
+    <div class="input-bar">
+      <div class="examples" id="examples"></div>
+      <div class="attach-row" id="attach-row"></div>
+      <div class="input-row">
+        <button class="icon-btn" id="attach-btn" title="Attach" style="display:none" onclick="document.getElementById('file-input').click()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="file-input" style="display:none" />
+        <textarea id="msg-input" placeholder="Message…" rows="1" disabled></textarea>
+        <button class="icon-btn send-btn" id="send-btn" disabled onclick="sendMessage()" title="Send">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 8L14 2L9 14L7.5 9.5L2 8Z" fill="white"/></svg>
+        </button>
+      </div>
+      <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+    </div>
+  </div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let MANIFEST = null;
+let sessionId = null;
+let busy = false;
+const pendingAttachments = [];   // {name, mimeType, dataB64}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    MANIFEST = await (await fetch('ui_manifest.json')).json();
+  } catch (e) {
+    setStatus('error', 'No manifest'); return;
+  }
+  document.title = MANIFEST.title || MANIFEST.app_name;
+  document.getElementById('app-title').textContent = MANIFEST.title || MANIFEST.app_name;
+  document.getElementById('app-tagline').textContent = MANIFEST.tagline || '';
+  document.getElementById('empty-title').textContent = MANIFEST.title || MANIFEST.app_name;
+  document.getElementById('empty-desc').textContent = MANIFEST.tagline || 'Ready to chat.';
+
+  buildInputs();
+  buildExamples();
+  await createSession();
+})();
+
+// ── Build input affordances from manifest ──────────────────────────────────────
+function buildInputs() {
+  const inputs = MANIFEST.inputs || ['TEXT'];
+  const wantsFile = inputs.includes('FILE_UPLOAD') || inputs.includes('IMAGE_UPLOAD');
+  const fileInput = document.getElementById('file-input');
+  if (wantsFile) {
+    document.getElementById('attach-btn').style.display = 'flex';
+    const accepts = MANIFEST.accept_mime_types || [];
+    if (accepts.length && !accepts.includes('*/*')) fileInput.setAttribute('accept', accepts.join(','));
+    fileInput.addEventListener('change', onFilePicked);
+  }
+  // Image paste
+  if (inputs.includes('IMAGE_UPLOAD')) {
+    document.getElementById('msg-input').addEventListener('paste', onPaste);
+  }
+}
+
+function buildExamples() {
+  const wrap = document.getElementById('examples');
+  (MANIFEST.example_prompts || []).slice(0, 3).forEach(p => {
+    const b = document.createElement('button');
+    b.className = 'example-btn'; b.textContent = p;
+    b.onclick = () => { const i = document.getElementById('msg-input'); i.value = p; i.focus(); autoResize(); };
+    wrap.appendChild(b);
+  });
+}
+
+async function onFilePicked(e) {
+  const file = e.target.files[0];
+  if (file) await addAttachment(file);
+  e.target.value = '';
+}
+async function onPaste(e) {
+  const items = e.clipboardData?.items || [];
+  for (const it of items) {
+    if (it.type.startsWith('image/')) { const f = it.getAsFile(); if (f) await addAttachment(f); }
+  }
+}
+async function addAttachment(file) {
+  const dataB64 = await fileToBase64(file);
+  pendingAttachments.push({ name: file.name || 'pasted', mimeType: file.type || 'application/octet-stream', dataB64 });
+  renderAttachments();
+}
+function renderAttachments() {
+  const row = document.getElementById('attach-row');
+  row.innerHTML = '';
+  pendingAttachments.forEach((a, idx) => {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.innerHTML = `<span>${a.mimeType.startsWith('image/') ? '🖼' : '📎'} ${escapeHtml(a.name)}</span>`;
+    const x = document.createElement('button'); x.textContent = '×';
+    x.onclick = () => { pendingAttachments.splice(idx, 1); renderAttachments(); };
+    chip.appendChild(x); row.appendChild(chip);
+  });
+}
+function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);  // strip data: prefix
+    r.onerror = rej; r.readAsDataURL(file);
+  });
+}
+
+// ── Session ─────────────────────────────────────────────────────────────────────
+async function createSession() {
+  try {
+    const r = await fetch(MANIFEST.endpoints.create_session, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (!r.ok) throw new Error('session ' + r.status);
+    sessionId = (await r.json()).id;
+    setStatus('online', 'Ready'); enable(true);
+    document.getElementById('msg-input').focus();
+  } catch (e) {
+    setStatus('error', 'Backend offline');
+  }
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function setStatus(state, text) {
+  document.getElementById('status-dot').className = 'status-dot ' + state;
+  document.getElementById('status-text').textContent = text;
+}
+function enable(on) {
+  document.getElementById('msg-input').disabled = !on;
+  document.getElementById('send-btn').disabled = !on;
+}
+const input = document.getElementById('msg-input');
+function autoResize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; }
+input.addEventListener('input', autoResize);
+input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) sendMessage(); } });
+
+// ── Send ──────────────────────────────────────────────────────────────────────
+async function sendMessage() {
+  const text = input.value.trim();
+  if ((!text && pendingAttachments.length === 0) || !sessionId || busy) return;
+  busy = true; enable(false); setStatus('thinking', 'Thinking…');
+  document.getElementById('empty-state').style.display = 'none';
+
+  // Build multimodal parts
+  const parts = [];
+  if (text) parts.push({ text });
+  const sentAttachments = pendingAttachments.slice();
+  for (const a of sentAttachments) parts.push({ inlineData: { mimeType: a.mimeType, data: a.dataB64 } });
+
+  appendUser(text, sentAttachments);
+  input.value = ''; autoResize();
+  pendingAttachments.length = 0; renderAttachments();
+
+  const typingRow = appendTyping();
+  const agentBubbles = {};   // author -> {bubble, text}
+
+  try {
+    const resp = await fetch(MANIFEST.endpoints.run_sse, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_name: MANIFEST.app_name, user_id: 'user', session_id: sessionId,
+        new_message: { role: 'user', parts }, streaming: true,
+      }),
+    });
+    if (!resp.ok) { typingRow.remove(); appendError(`Error ${resp.status}`); return; }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const chunks = buf.split('\n\n'); buf = chunks.pop();
+      for (const chunk of chunks) {
+        const line = chunk.trim();
+        if (!line.startsWith('data:')) continue;
+        const json = line.slice(5).trim();
+        if (!json) continue;
+        let ev; try { ev = JSON.parse(json); } catch { continue; }
+        handleEvent(ev, agentBubbles, typingRow);
+      }
+    }
+    typingRow.remove();
+    if (Object.keys(agentBubbles).length === 0) appendAgentText('assistant', '(No response)');
+  } catch (err) {
+    typingRow.remove(); appendError(err.message);
+  } finally {
+    busy = false; enable(true); setStatus('online', 'Ready'); input.focus(); scrollToBottom();
+  }
+}
+
+// ── Event handling: author-visibility filter + output routing ───────────────────
+function isUserFacing(author) {
+  const list = MANIFEST.user_facing_agents || [];
+  if (list.length === 0) return true;         // no designation → show finals (fallback)
+  return list.includes(author);
+}
+
+function handleEvent(ev, agentBubbles, typingRow) {
+  if (ev.error) { typingRow.remove(); appendError(ev.error); return; }
+  const author = ev.author || 'assistant';
+
+  // 1) Artifact deltas (action-only frames) — fetch + render, if author is user-facing.
+  const deltas = ev.actions && ev.actions.artifactDelta;
+  if (deltas && isUserFacing(author)) {
+    typingRow.remove();
+    for (const [filename, version] of Object.entries(deltas)) renderArtifact(filename, version);
+  }
+
+  const parts = (ev.content && ev.content.parts) || [];
+  if (!parts.length) return;
+
+  // 2) Text content — only from user-facing authors (hides intermediate agents).
+  if (!isUserFacing(author)) return;
+  const textPart = parts.map(p => p.text).filter(Boolean).join('');
+  if (textPart) {
+    typingRow.remove();
+    if (!agentBubbles[author]) agentBubbles[author] = { row: appendAgentText(author, ''), text: '' };
+    agentBubbles[author].text += textPart;
+    setBubbleContent(agentBubbles[author].row, agentBubbles[author].text);
+    scrollToBottom();
+  }
+}
+
+// ── Artifact fetch + render ─────────────────────────────────────────────────────
+async function renderArtifact(filename, version) {
+  try {
+    const url = MANIFEST.endpoints.artifact
+      .replace('{session_id}', sessionId)
+      .replace('{filename}', encodeURIComponent(filename))
+      .replace('{version}', version);
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const part = await r.json();
+    const blob = part.inlineData || part.inline_data;
+    if (!blob || !blob.data) return;
+    const mime = blob.mimeType || blob.mime_type || 'application/octet-stream';
+    const dataUri = `data:${mime};base64,${blob.data}`;
+    const renderers = MANIFEST.output_renderers || [];
+    const col = artifactCol();
+    if (mime.startsWith('image/') && renderers.includes('IMAGE')) {
+      const img = document.createElement('img'); img.className = 'artifact-img'; img.src = dataUri;
+      col.appendChild(img);
+    } else {
+      const a = document.createElement('a'); a.className = 'artifact-file';
+      a.href = dataUri; a.download = filename; a.textContent = '📎 ' + filename;
+      col.appendChild(a);
+    }
+    scrollToBottom();
+  } catch (e) { /* ignore artifact fetch errors */ }
+}
+
+// ── DOM builders ────────────────────────────────────────────────────────────────
+function messages() { return document.getElementById('messages'); }
+function scrollToBottom() { const c = messages(); c.scrollTop = c.scrollHeight; }
+function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function renderText(text) {
+  const renderers = MANIFEST.output_renderers || ['TEXT'];
+  if (renderers.includes('MARKDOWN') && window.marked) return marked.parse(text);
+  if (renderers.includes('CODE') && /^```/.test(text.trim())) return marked ? marked.parse(text) : `<pre>${escapeHtml(text)}</pre>`;
+  return escapeHtml(text).replace(/\n/g, '<br>');
+}
+function setBubbleContent(row, text) {
+  const bubble = row.querySelector('.bubble');
+  bubble.innerHTML = renderText(text);
+}
+
+function appendUser(text, attachments) {
+  const row = mkRow('user', 'You');
+  const bubble = row.querySelector('.bubble');
+  bubble.textContent = text || '';
+  (attachments || []).forEach(a => {
+    if (a.mimeType.startsWith('image/')) {
+      const img = document.createElement('img'); img.className = 'artifact-img'; img.src = `data:${a.mimeType};base64,${a.dataB64}`;
+      bubble.appendChild(img);
+    } else {
+      const chip = document.createElement('div'); chip.style.marginTop = '6px'; chip.style.fontSize = '12px'; chip.textContent = '📎 ' + a.name;
+      bubble.appendChild(chip);
+    }
+  });
+  scrollToBottom(); return row;
+}
+function appendAgentText(author, text) {
+  const row = mkRow('agent', author);
+  if (text) setBubbleContent(row, text);
+  scrollToBottom(); return row;
+}
+function artifactCol() {
+  // Append artifacts under a fresh agent row (spacer avatar) for visual grouping.
+  const row = document.createElement('div'); row.className = 'msg-row agent';
+  const spacer = document.createElement('div'); spacer.style.width = '30px'; spacer.style.flexShrink = '0';
+  const col = document.createElement('div'); col.className = 'bubble-col';
+  row.appendChild(spacer); row.appendChild(col); messages().appendChild(row);
+  return col;
+}
+function mkRow(role, label) {
+  const row = document.createElement('div'); row.className = `msg-row ${role}`;
+  const avatar = document.createElement('div'); avatar.className = `avatar ${role}`;
+  avatar.textContent = role === 'user' ? 'Y' : '✦';
+  const col = document.createElement('div'); col.className = 'bubble-col';
+  const lbl = document.createElement('div'); lbl.className = 'sender-label'; lbl.textContent = role === 'user' ? 'You' : label;
+  const bubble = document.createElement('div'); bubble.className = `bubble ${role}`;
+  col.appendChild(lbl); col.appendChild(bubble);
+  row.appendChild(avatar); row.appendChild(col); messages().appendChild(row);
+  return row;
+}
+function appendTyping() {
+  const row = mkRow('agent', MANIFEST.title || 'Agent');
+  const bubble = row.querySelector('.bubble');
+  const ind = document.createElement('div'); ind.className = 'typing-indicator';
+  for (let i = 0; i < 3; i++) { const d = document.createElement('div'); d.className = 'typing-dot'; ind.appendChild(d); }
+  bubble.appendChild(ind); scrollToBottom(); return row;
+}
+function appendError(msg) {
+  const row = document.createElement('div'); row.className = 'msg-row agent';
+  const spacer = document.createElement('div'); spacer.style.width = '30px'; spacer.style.flexShrink = '0';
+  const col = document.createElement('div'); col.className = 'bubble-col';
+  const bubble = document.createElement('div'); bubble.className = 'bubble error'; bubble.textContent = '⚠ ' + msg;
+  col.appendChild(bubble); row.appendChild(spacer); row.appendChild(col); messages().appendChild(row); scrollToBottom();
+}
+</script>
+</body>
+</html>

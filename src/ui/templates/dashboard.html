@@ -1178,6 +1178,40 @@
       animation: spin 0.7s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── HITL-3: UI review panel ── */
+    .ui-field-label {
+      display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary);
+      margin: 14px 0 6px;
+    }
+    .ui-input {
+      width: 100%; padding: 8px 11px; border: 1.5px solid var(--border); border-radius: 8px;
+      background: var(--bg); color: var(--text-primary); font-family: var(--font);
+      font-size: 13px; outline: none;
+    }
+    .ui-input:focus { border-color: var(--claude-orange); }
+    .ui-chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ui-chip {
+      display: inline-flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer;
+      padding: 6px 11px; border: 1.5px solid var(--border); border-radius: 20px;
+      background: var(--bg); color: var(--text-secondary); user-select: none;
+    }
+    .ui-chip:has(input:checked) {
+      border-color: var(--claude-orange); background: rgba(217,119,86,.08); color: var(--text-primary);
+    }
+    .ui-chip input { accent-color: var(--claude-orange); }
+    .ui-btn-primary {
+      padding: 9px 20px; background: linear-gradient(135deg, var(--claude-orange), var(--accent));
+      color: #fff; border: none; border-radius: var(--radius-sm); font-family: var(--font);
+      font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .ui-btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+    .ui-btn-secondary {
+      padding: 9px 18px; background: var(--surface); color: var(--text-primary);
+      border: 1.5px solid var(--border); border-radius: var(--radius-sm); font-family: var(--font);
+      font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .ui-btn-secondary:hover { border-color: var(--border-strong); }
   </style>
 </head>
 <body>
@@ -1298,6 +1332,69 @@
         Submit &amp; continue
       </button>
       <div id="debug-env-status" style="margin-top:10px;font-size:12px;color:var(--text-secondary)"></div>
+    </div>
+    {% endif %}
+
+    {% if status.startswith("awaiting_ui_review") and tree and tree.ui_spec %}
+    <!-- ── HITL-3: UI / interaction review ───────────────────────────────── -->
+    <div class="state-card" id="ui-review-card" style="border-color:var(--claude-orange);max-width:640px;text-align:left">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <div class="state-icon" style="margin:0">🎨</div>
+        <div class="state-title" style="margin:0">Review the generated frontend</div>
+      </div>
+      <div class="state-desc" style="margin-bottom:18px">
+        The UI Designer chose the interaction contract below from the requirement.
+        Override anything, then approve to compile — or re-design to regenerate.
+      </div>
+
+      <label class="ui-field-label">Title</label>
+      <input class="ui-input" id="ui-title" value="{{ tree.ui_spec.title }}" />
+
+      <label class="ui-field-label">Tagline</label>
+      <input class="ui-input" id="ui-tagline" value="{{ tree.ui_spec.tagline }}" />
+
+      <label class="ui-field-label">Inputs (TEXT is always on)</label>
+      <div class="ui-chip-row" id="ui-inputs">
+        {% set enabled_inputs = tree.ui_spec.inputs | map(attribute='value') | list %}
+        {% for opt in ["TEXT", "FILE_UPLOAD", "IMAGE_UPLOAD"] %}
+        <label class="ui-chip">
+          <input type="checkbox" value="{{ opt }}"
+                 {% if opt in enabled_inputs %}checked{% endif %}
+                 {% if opt == "TEXT" %}disabled checked{% endif %} />
+          {{ opt }}
+        </label>
+        {% endfor %}
+      </div>
+
+      <label class="ui-field-label">Output renderers</label>
+      <div class="ui-chip-row" id="ui-renderers">
+        {% set enabled_rend = tree.ui_spec.output_renderers | map(attribute='value') | list %}
+        {% for opt in ["TEXT", "MARKDOWN", "TABLE", "IMAGE", "FILE_DOWNLOAD", "CODE"] %}
+        <label class="ui-chip">
+          <input type="checkbox" value="{{ opt }}" {% if opt in enabled_rend %}checked{% endif %} />
+          {{ opt }}
+        </label>
+        {% endfor %}
+      </div>
+
+      <label class="ui-field-label">User-facing agents (others are hidden from the user)</label>
+      <div class="ui-chip-row" id="ui-userfacing">
+        {% for node in tree.root.topological_order() %}
+        <label class="ui-chip">
+          <input type="checkbox" value="{{ node.name }}"
+                 {% if node.visibility.value == "user_facing" %}checked{% endif %} />
+          {{ node.name }}
+          {% if node.output_media_types %}<span style="color:var(--claude-orange)">◆</span>{% endif %}
+        </label>
+        {% endfor %}
+      </div>
+
+      <div style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap">
+        <button onclick="saveUI(this)" class="ui-btn-secondary">Save edits</button>
+        <button onclick="approveUI(this)" class="ui-btn-primary">Approve &amp; compile</button>
+        <button onclick="rollbackUI(this)" class="ui-btn-secondary">↻ Re-design</button>
+      </div>
+      <div id="ui-review-status" style="margin-top:10px;font-size:12px;color:var(--text-secondary)"></div>
     </div>
     {% endif %}
 
@@ -1453,9 +1550,9 @@
       <div id="sandbox-cta" class="sandbox-cta">
         <div class="sandbox-cta-title">Run in Sandbox</div>
         <div class="sandbox-cta-desc">
-          Install the generated agent's dependencies and launch the
-          <strong>Google ADK web UI</strong> — a live chat interface
-          with real-time event tracing.
+          Install the generated project's dependencies and launch the
+          <strong>generated product UI</strong> — the manifest-driven frontend
+          with the inputs and renderers chosen for this project.
         </div>
 
         <!-- Credential form — populated by loadRequiredEnvVars() on page load -->
@@ -1490,11 +1587,11 @@
 
         <!-- Ready banner (hidden until ready) -->
         <div id="sandbox-ready-banner" class="sandbox-ready-header" style="display:none">
-          <span>✓ Agent chat ready</span>
+          <span>✓ Ready</span>
           <a id="sandbox-open-link"
-             href="/chat/{{ tree.project_name if tree else '' }}"
+             href="#"
              target="_blank" class="btn-open-chat">
-            Open Chat →
+            Open Product UI →
           </a>
         </div>
 
@@ -1519,6 +1616,7 @@
 let currentStatus = {{ status | tojson }};
 let currentLayer  = {{ current_layer | int }};
 const TREE_ENDPOINT = {{ (tree_endpoint if tree_endpoint is defined else '/tree') | tojson }};
+const SANDBOX_PROJECT_NAME = {{ (sandbox_project_name if sandbox_project_name is defined else None) | tojson }};
 let autoRefreshTimer = null;
 
 // ── Status pill rendering ────────────────────────────────────────────────────
@@ -1531,7 +1629,7 @@ function renderStatusPill(status) {
 
   if (status === 'done') {
     pill.classList.add('done');
-  } else if (status.startsWith('awaiting_review') || status.startsWith('awaiting_impl_review')) {
+  } else if (status.startsWith('awaiting_review') || status.startsWith('awaiting_impl_review') || status.startsWith('awaiting_ui_review')) {
     pill.classList.add('review');
   } else if (status === 'idle') {
     pill.classList.add('idle');
@@ -1705,7 +1803,7 @@ function toast(msg, type = 'info') {
 }
 
 // ── Auto-refresh when pipeline is processing ─────────────────────────────────
-{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and status != "done" and status != "debug_awaiting_env" %}
+{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and not status.startswith("awaiting_ui_review") and status != "done" and status != "debug_awaiting_env" %}
 autoRefreshTimer = setTimeout(() => location.reload(), 3500);
 {% endif %}
 
@@ -1866,7 +1964,10 @@ async function loadRequiredEnvVars() {
   const btn = document.getElementById('btn-sandbox-start');
   if (!btn) return;  // not in "done" state
   try {
-    const r = await fetch('/sandbox/required_env');
+    const url = SANDBOX_PROJECT_NAME
+      ? `/sandbox/required_env?project_name=${encodeURIComponent(SANDBOX_PROJECT_NAME)}`
+      : '/sandbox/required_env';
+    const r = await fetch(url);
     if (!r.ok) { btn.disabled = false; return; }
     const { required, missing } = await r.json();
     if (!required || required.length === 0) { btn.disabled = false; return; }
@@ -1917,7 +2018,7 @@ async function saveEnvVars() {
     const r = await fetch('/sandbox/env', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ env_vars }),
+      body: JSON.stringify({ env_vars, project_name: SANDBOX_PROJECT_NAME }),
     });
     if (r.ok) {
       status.textContent = 'Saved ✓';
@@ -1941,7 +2042,11 @@ async function startSandbox() {
   document.getElementById('sandbox-ready-banner').style.display = 'none';
 
   try {
-    const r = await fetch('/sandbox/start', { method: 'POST' });
+    const r = await fetch('/sandbox/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_name: SANDBOX_PROJECT_NAME }),
+    });
     if (!r.ok) {
       const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
       sandboxLog('✗ ' + (d.detail || 'Failed to start sandbox'));
@@ -1965,10 +2070,11 @@ function openSandboxSSE(port) {
     const line = e.data;
     sandboxLog(line);
 
-    if (line.includes('Agent chat ready')) {
+    if (line.includes('Agent chat ready') || line.includes('✓ Ready at')) {
       renderSandboxStatus('ready');
       const banner = document.getElementById('sandbox-ready-banner');
       if (banner) banner.style.display = 'flex';
+      updateOpenChatLink();
       // Keep SSE stream open to show runtime logs
     } else if (line.startsWith('✗') || (line.includes('failed') && !line.includes('▶'))) {
       renderSandboxStatus('error');
@@ -1979,6 +2085,17 @@ function openSandboxSSE(port) {
   sandboxSSE.onerror = () => {
     if (sandboxSSE) { sandboxSSE.close(); sandboxSSE = null; }
   };
+}
+
+async function updateOpenChatLink() {
+  try {
+    const r = await fetch('/sandbox/status');
+    if (!r.ok) return;
+    const { port } = await r.json();
+    const link = document.getElementById('sandbox-open-link');
+    if (!link || !port) return;
+    link.href = `http://localhost:${port}/`;
+  } catch {}
 }
 
 async function stopSandbox() {
@@ -2008,6 +2125,7 @@ async function checkSandboxOnTabSwitch() {
     } else if (status === 'ready') {
       const banner = document.getElementById('sandbox-ready-banner');
       if (banner) banner.style.display = 'flex';
+      updateOpenChatLink();
       // Replay existing logs via SSE (they will replay from offset 0)
       openSandboxSSE(port);
     }
@@ -2332,6 +2450,15 @@ loadImplReview();
 loadRequiredEnvVars();
 {% endif %}
 
+// Auto-start sandbox when ?autorun=1 is present (linked from the index page "▶ Run" button)
+if (new URLSearchParams(window.location.search).get('autorun') === '1') {
+  switchTab('sandbox');
+  // Only start if the sandbox isn't already running
+  fetch('/sandbox/status').then(r => r.json()).then(({ status }) => {
+    if (status === 'idle') startSandbox();
+  }).catch(() => {});
+}
+
 // ── Debug env-var collection form ────────────────────────────────────────────
 {% if status == "debug_awaiting_env" %}
 (async function buildDebugEnvForm() {
@@ -2392,6 +2519,92 @@ async function submitDebugEnv() {
     }
   } catch (err) {
     statusEl.textContent = 'Error: ' + err.message;
+  }
+}
+
+// ── On page load: show ready banner and set link if sandbox is already running ─
+(async () => {
+  try {
+    const r = await fetch('/sandbox/status');
+    if (!r.ok) return;
+    const { status, port } = await r.json();
+    if (status !== 'ready' || !port) return;
+    const banner = document.getElementById('sandbox-ready-banner');
+    if (banner) banner.style.display = 'flex';
+    const link = document.getElementById('sandbox-open-link');
+    if (link) link.href = `http://localhost:${port}/`;
+  } catch {}
+})();
+
+// ── HITL-3: UI / interaction review ──────────────────────────────────────────
+function _collectChecked(containerId, opts) {
+  const el = document.getElementById(containerId);
+  if (!el) return [];
+  return Array.from(el.querySelectorAll('input[type="checkbox"]:checked')).map(c => c.value);
+}
+
+function _uiPayload() {
+  return {
+    title: document.getElementById('ui-title').value,
+    tagline: document.getElementById('ui-tagline').value,
+    inputs: _collectChecked('ui-inputs'),
+    output_renderers: _collectChecked('ui-renderers'),
+    user_facing_nodes: _collectChecked('ui-userfacing'),
+  };
+}
+
+async function saveUI(btn) {
+  const statusEl = document.getElementById('ui-review-status');
+  statusEl.textContent = 'Saving…';
+  try {
+    const r = await fetch('/edit_ui', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_uiPayload()),
+    });
+    statusEl.textContent = r.ok ? 'Saved ✓' : 'Save failed';
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+}
+
+async function approveUI(btn) {
+  btn.disabled = true;
+  const statusEl = document.getElementById('ui-review-status');
+  statusEl.textContent = 'Saving edits…';
+  try {
+    // Persist any edits first, then approve.
+    await fetch('/edit_ui', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_uiPayload()),
+    });
+    const r = await fetch('/approve_ui', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
+      statusEl.textContent = d.detail || 'Approve failed';
+      btn.disabled = false;
+      return;
+    }
+    statusEl.textContent = 'Approved — compiling…';
+    setTimeout(() => location.reload(), 1200);
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function rollbackUI(btn) {
+  btn.disabled = true;
+  const statusEl = document.getElementById('ui-review-status');
+  statusEl.textContent = 'Re-designing…';
+  try {
+    const r = await fetch('/rollback_ui', { method: 'POST' });
+    if (!r.ok) { statusEl.textContent = 'Re-design failed'; btn.disabled = false; return; }
+    setTimeout(() => location.reload(), 1200);
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
   }
 }
 </script>

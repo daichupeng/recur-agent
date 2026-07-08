@@ -49,6 +49,23 @@ Rules:
 - Every branch must end with a return statement that produces a dict matching the output_schema.
 - Do not add any explanation or markdown — return raw Python code only.
 
+## Media artifacts (only for nodes flagged with `emits_media`)
+Some nodes must ALSO emit a binary artifact (an image or a downloadable file) so the frontend
+can display or download it. For a node flagged `emits_media` with `media_types` listed:
+- The function is ASYNC. Its body runs inside `async def`, so you MAY use `await`.
+- The function receives an extra parameter `tool_context` (already added to the signature).
+- Build the binary payload as `bytes`, then persist it as an ADK artifact:
+      from google.genai import types
+      _part = types.Part.from_bytes(data=<the bytes>, mime_type="<one of the media_types>")
+      await tool_context.save_artifact(filename="<name>.<ext>", artifact=_part)
+  Every one of these lines must be indented 4 spaces (inside the function body).
+- Include the artifact filename in the returned dict under the key `artifact_filename` (add it to
+  the return alongside the output_schema fields).
+- To generate an image without heavy deps, prefer Pillow (`from PIL import Image`) or matplotlib
+  (`import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt`) writing to an
+  `io.BytesIO`. For a text/CSV/PDF file, build the bytes directly.
+- Still return a dict matching the output_schema (plus `artifact_filename`).
+
 You MUST respond with a JSON array parallel to the input array — one entry per input node:
 [
   {
@@ -103,6 +120,8 @@ class ToolImplementorAgent(BaseAgent):
                 "exec_type": n.exec_type.value if n.exec_type else None,
                 "input_schema": n.input_schema,
                 "output_schema": n.output_schema,
+                "emits_media": bool(n.output_media_types),
+                "media_types": n.output_media_types,
             }
             for n in nodes
         ]
@@ -134,16 +153,19 @@ class ToolImplementorAgent(BaseAgent):
 
         for node, result in zip(nodes, results):
             raw = result.get("implementation", "")
+            is_async = bool(node.output_media_types)
             normalised = _normalise_indent(raw)
-            syntax_error = _check_syntax(normalised)
+            syntax_error = _check_syntax(normalised, is_async=is_async)
             if syntax_error:
-                normalised = await self._retry_until_valid(node, normalised, syntax_error)
+                normalised = await self._retry_until_valid(
+                    node, normalised, syntax_error, is_async=is_async
+                )
             node.implementation = normalised
             logger.debug("Implementation generated for: %s", node.name)
 
 
     async def _retry_until_valid(
-        self, node: SkillNode, bad_body: str, error: str
+        self, node: SkillNode, bad_body: str, error: str, *, is_async: bool = False
     ) -> str:
         """Re-prompt the LLM with the syntax error until the body parses, up to _MAX_SYNTAX_RETRIES."""
         for attempt in range(1, _MAX_SYNTAX_RETRIES + 1):
@@ -151,13 +173,17 @@ class ToolImplementorAgent(BaseAgent):
                 "Syntax error in '%s' (attempt %d/%d): %s",
                 node.name, attempt, _MAX_SYNTAX_RETRIES, error,
             )
+            async_note = (
+                " This is an ASYNC function body — `await` is allowed at the top level."
+                if is_async else ""
+            )
             user_content = (
                 f"The implementation you generated for '{node.name}' has a Python syntax error:\n\n"
                 f"  {error}\n\n"
                 f"Broken code:\n```python\n{bad_body}\n```\n\n"
                 "Fix the syntax error and return the corrected function body as a JSON array "
                 "with a single entry: [{\"implementation\": \"<fixed body>\"}]\n"
-                "Rules: every line must be indented 4 spaces; no def line; no markdown."
+                f"Rules: every line must be indented 4 spaces; no def line; no markdown.{async_note}"
             )
             message = await self._call(
                 messages=[{"role": "user", "content": user_content}],
@@ -169,7 +195,7 @@ class ToolImplementorAgent(BaseAgent):
                 fixed = _normalise_indent(results[0].get("implementation", ""))
             except Exception:
                 continue
-            new_error = _check_syntax(fixed)
+            new_error = _check_syntax(fixed, is_async=is_async)
             if not new_error:
                 logger.info("Syntax fixed for '%s' on retry %d.", node.name, attempt)
                 return fixed
@@ -182,10 +208,15 @@ class ToolImplementorAgent(BaseAgent):
         return bad_body
 
 
-def _check_syntax(body: str) -> str | None:
-    """Return a syntax error message if body is not valid Python, else None."""
+def _check_syntax(body: str, *, is_async: bool = False) -> str | None:
+    """Return a syntax error message if body is not valid Python, else None.
+
+    Media nodes compile to `async def`, so their body may use top-level `await`;
+    wrap in `async def` for the check or the await would be flagged as a syntax error.
+    """
     # Body is already 4-space indented; just wrap in a dummy function.
-    wrapped = "def _f():\n" + body
+    prefix = "async def _f():\n" if is_async else "def _f():\n"
+    wrapped = prefix + body
     try:
         ast.parse(wrapped)
         return None

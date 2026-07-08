@@ -375,118 +375,11 @@
       border: none;
       border-radius: 6px;
       cursor: pointer;
+      text-decoration: none;
       transition: opacity 0.15s;
       flex-shrink: 0;
     }
     .btn-run-project:hover { opacity: 0.88; }
-    .btn-run-project:disabled { opacity: 0.45; cursor: not-allowed; }
-
-    .run-status {
-      font-size: 11px;
-      color: var(--text-tertiary);
-      margin-top: 4px;
-    }
-
-    /* Mini log terminal */
-    .mini-log-wrap {
-      margin-top: 16px;
-      background: #0f0f0e;
-      border: 1.5px solid #2a2a28;
-      border-radius: var(--radius-sm);
-      overflow: hidden;
-      display: none;
-    }
-
-    .mini-log-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 6px 12px;
-      background: #1a1a18;
-      border-bottom: 1px solid #2a2a28;
-    }
-
-    .mini-log-title {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.07em;
-      color: #6b6b69;
-    }
-
-    .mini-log {
-      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
-      font-size: 11px;
-      line-height: 1.55;
-      color: #d4d4d0;
-      padding: 10px 14px;
-      max-height: 280px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-
-    .mini-log .log-ok  { color: #4ade80; }
-    .mini-log .log-err { color: #f87171; }
-
-    .mini-ready-banner {
-      margin-top: 12px;
-      display: none;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 16px;
-      background: #f0fdf4;
-      border: 1.5px solid #bbf7d0;
-      border-radius: var(--radius-sm);
-    }
-
-    .mini-ready-banner span {
-      flex: 1;
-      font-size: 13px;
-      font-weight: 600;
-      color: #16a34a;
-    }
-
-    .btn-open-chat-mini {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 7px 14px;
-      font-family: var(--font);
-      font-size: 12px;
-      font-weight: 600;
-      background: linear-gradient(135deg, #16a34a, #15803d);
-      color: #fff;
-      text-decoration: none;
-      border-radius: 6px;
-    }
-    .btn-open-chat-mini:hover { opacity: 0.88; }
-
-    .btn-stop-mini {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 5px 12px;
-      font-family: var(--font);
-      font-size: 11px;
-      font-weight: 500;
-      background: transparent;
-      color: #dc2626;
-      border: 1.5px solid #fecaca;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    .btn-stop-mini:hover { background: #fef2f2; }
-
-    .spinner-mini {
-      display: inline-block;
-      width: 12px; height: 12px;
-      border: 2px solid rgba(255,255,255,0.35);
-      border-top-color: #fff;
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -586,19 +479,6 @@
   <div class="projects-section" id="projects-section" style="display:none">
     <div class="projects-heading">Previously compiled projects</div>
     <div class="projects-list" id="projects-list"></div>
-
-    <!-- Shared log/ready panel (one at a time) -->
-    <div class="mini-log-wrap" id="mini-log-wrap">
-      <div class="mini-log-header">
-        <span class="mini-log-title">Sandbox setup</span>
-        <button class="btn-stop-mini" onclick="stopMiniSandbox()">■ Stop</button>
-      </div>
-      <pre class="mini-log" id="mini-log"></pre>
-    </div>
-    <div class="mini-ready-banner" id="mini-ready-banner">
-      <span>✓ Agent chat ready</span>
-      <a id="mini-open-link" href="#" target="_blank" class="btn-open-chat-mini">Open Chat →</a>
-    </div>
   </div>
 </main>
 
@@ -666,9 +546,6 @@ function showError(msg) {
 })();
 
 // ── Existing projects ─────────────────────────────────────────────────────────
-let miniSSE = null;
-let miniActiveProject = null;
-
 (async () => {
   try {
     const r = await fetch('/projects');
@@ -684,120 +561,17 @@ let miniActiveProject = null;
     for (const proj of projects) {
       const row = document.createElement('div');
       row.className = 'project-row';
-      row.id = `project-row-${proj.name}`;
       row.innerHTML = `
-        <div>
-          <div class="project-name">${proj.name}</div>
-          <div class="run-status" id="run-status-${proj.name}"></div>
-        </div>
+        <div class="project-name">${proj.name}</div>
         <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
           <a class="btn-view-project" href="/project/${proj.name}">View →</a>
-          <button class="btn-run-project" id="btn-run-${proj.name}" onclick="runProject('${proj.name}', this)">
-            ▶ Run
-          </button>
+          <a class="btn-run-project" href="/project/${proj.name}?autorun=1">▶ Run</a>
         </div>
       `;
       list.appendChild(row);
     }
-
-    // If sandbox already running, restore state
-    const sr = await fetch('/sandbox/status');
-    if (sr.ok) {
-      const { status } = await sr.json();
-      if (status === 'ready' && miniActiveProject) {
-        showMiniReady(miniActiveProject);
-      }
-    }
   } catch {}
 })();
-
-async function runProject(projectName, btn) {
-  if (miniActiveProject && miniActiveProject !== projectName) {
-    await stopMiniSandbox();
-  }
-  miniActiveProject = projectName;
-
-  // Reset UI
-  document.getElementById('mini-ready-banner').style.display = 'none';
-  const logWrap = document.getElementById('mini-log-wrap');
-  logWrap.style.display = 'block';
-  document.getElementById('mini-log').textContent = '';
-
-  // Disable all run buttons
-  document.querySelectorAll('.btn-run-project').forEach(b => {
-    b.disabled = true;
-    if (b.id === `btn-run-${projectName}`) {
-      b.innerHTML = '<span class="spinner-mini"></span>';
-    }
-  });
-
-  try {
-    const r = await fetch(`/sandbox/start/${projectName}`, { method: 'POST' });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({ detail: 'Unknown error' }));
-      miniLog('✗ ' + (d.detail || 'Failed to start'));
-      resetMiniButtons();
-      return;
-    }
-    await r.json();
-    openMiniSSE(projectName);
-  } catch (err) {
-    miniLog('✗ ' + err.message);
-    resetMiniButtons();
-  }
-}
-
-function miniLog(line) {
-  const pre = document.getElementById('mini-log');
-  if (!pre) return;
-  const span = document.createElement('span');
-  if (line.startsWith('✓') || line.startsWith('▶')) span.className = 'log-ok';
-  else if (line.startsWith('✗') || line.toLowerCase().includes('error')) span.className = 'log-err';
-  span.textContent = line + '\n';
-  pre.appendChild(span);
-  pre.scrollTop = pre.scrollHeight;
-}
-
-function openMiniSSE(projectName) {
-  if (miniSSE) { miniSSE.close(); miniSSE = null; }
-  miniSSE = new EventSource('/sandbox/logs');
-  miniSSE.onmessage = (e) => {
-    const line = e.data;
-    miniLog(line);
-    if (line.includes('Agent chat ready')) {
-      showMiniReady(projectName);
-      resetMiniButtons();
-      // Keep stream open to show runtime logs
-    } else if (line.startsWith('✗')) {
-      resetMiniButtons();
-      // Keep stream open to show full error context
-    }
-  };
-  miniSSE.onerror = () => { if (miniSSE) { miniSSE.close(); miniSSE = null; } resetMiniButtons(); };
-}
-
-function showMiniReady(projectName) {
-  const banner = document.getElementById('mini-ready-banner');
-  const link = document.getElementById('mini-open-link');
-  link.href = `/chat/${projectName}`;
-  banner.style.display = 'flex';
-}
-
-function resetMiniButtons() {
-  document.querySelectorAll('.btn-run-project').forEach(b => {
-    b.disabled = false;
-    b.innerHTML = '▶ Run';
-  });
-}
-
-async function stopMiniSandbox() {
-  if (miniSSE) { miniSSE.close(); miniSSE = null; }
-  await fetch('/sandbox/stop', { method: 'POST' });
-  document.getElementById('mini-log-wrap').style.display = 'none';
-  document.getElementById('mini-ready-banner').style.display = 'none';
-  resetMiniButtons();
-  miniActiveProject = null;
-}
 </script>
 
 </body>
