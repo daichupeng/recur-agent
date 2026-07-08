@@ -129,22 +129,57 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         |
         v
   +------------------------------------------+
+  | UI Designer Agent  (claude-haiku)        |
+  |  select frontend/interaction contract:   |
+  |    input affordances                     |
+  |      TEXT (mandatory)                    |
+  |      FILE_UPLOAD, IMAGE_UPLOAD (opt)     |
+  |    output renderers                      |
+  |      TEXT, MARKDOWN, TABLE, CODE,        |
+  |      IMAGE, FILE_DOWNLOAD (select ≥1)    |
+  |    user-facing vs internal agents        |
+  |    nodes with binary artifact output     |
+  |  produce UISpec (structured data only)   |
+  +------------------------------------------+
+        |
+        v
+  ##################################################
+  #  HITL-3: UI Review  (dashboard, skippable)     #
+  ##################################################
+        |
+        +-- ROLLBACK? --> re-run UIDesigner -----+
+        |                                        |
+        +-- APPROVE? ----+
+        |                v
+        |           continue
+        |
+        v
+  +------------------------------------------+
   | Compiler  (Jinja2, no LLM)               |
   |  normalise names to snake_case           |
   |  scan impls -> collect third-party deps  |
   |  scan impls -> collect required env vars |
   |  copy root .env -> project dir           |
+  |  if ui_spec is not None:                 |
+  |    compile frontend_index.html.j2        |
+  |      -> web/index.html (manifest SPA)    |
+  |    compile ui_manifest.json.j2           |
+  |      -> web/ui_manifest.json (UI config) |
+  |    compile serve.py.j2                   |
+  |      -> serve.py (StaticFiles mounted)   |
   |  depth-first recursive walk:             |
   |                                          |
   |  ATOMIC -> LLM_PROMPT                    |
   |    adk_llm_agent_stub.py.j2              |
   |    -> atomics/{name}.py  (LlmAgent)      |
+  |    (async if media_types set)            |
   |                                          |
   |  ATOMIC -> DETERMINISTIC_CODE /          |
   |            EXTERNAL_API                  |
   |    adk_tool_stub.py.j2                   |
   |    -> atomics/{name}.py                  |
   |       (FunctionTool + LlmAgent wrapper)  |
+  |       (async if media_types set)         |
   |                                          |
   |  COMPOSITE -> SEQUENTIAL                 |
   |    -> orchestrators/{name}.py            |
@@ -195,6 +230,26 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
 
 ---
 
+## UI Design (HITL-3)
+
+After the entire skill tree is decomposed and implemented, the **UIDesignerAgent** designs the product's frontend by selecting from a fixed interaction catalog:
+
+- **Input affordances**: TEXT (mandatory), FILE_UPLOAD, IMAGE_UPLOAD
+- **Output renderers**: TEXT, MARKDOWN (for reports), TABLE (for datasets), CODE, IMAGE, FILE_DOWNLOAD
+- **User-facing agents**: which node outputs the user sees; intermediate agents (parsers, fetchers, validators) are marked INTERNAL and their output is hidden
+- **Media output**: which nodes emit binary artifacts (images, downloads) and their MIME types
+
+The UIDesigner produces **structured data only** (a `UISpec`); the Compiler uses Jinja2 to turn that into actual HTML/JavaScript:
+- `web/index.html` — single-page app with manifest-driven UI
+- `web/ui_manifest.json` — UI configuration (affordances, renderers, user-facing agents)
+- `serve.py` — FastAPI app that serves both the generated UI **and** the ADK API from one process on port 8080
+
+**HITL-3** (optional, skippable with `SKIP_UI_REVIEW=1`) lets you review the UI design and either approve it or rollback to re-run the designer.
+
+Nodes with media output are re-implemented as `async` functions with a `ToolContext` parameter to call `save_artifact()`. The ADK strips this parameter from the Gemini function declaration so the model never sees it.
+
+---
+
 ## Skill Library (skill_lib)
 
 **recur-agent** maintains a cross-project skill library that captures fully-hydrated atomic skills:
@@ -237,10 +292,12 @@ Uses the **Anthropic SDK** for internal agents:
 - [src/agents/prompt_engineer.py](src/agents/prompt_engineer.py) — writes ADK session-state-aware instructions for LLM_PROMPT nodes
 - [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; prefers domain client libraries over raw HTTP; mandates `os.environ` for credentials; uses claude-sonnet-4-6 with syntax validation and retry
 - [src/agents/debug.py](src/agents/debug.py) — analyzes failed import traces, auto-repair failures, and generates patch code for broken implementations
-- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; copies referenced skill_lib files into output
-- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with two HITL checkpoints and per-node re-decompose; saves fully-hydrated atomics to skill_lib after each approved layer
+- [src/agents/ui_designer.py](src/agents/ui_designer.py) — selects input affordances, output renderers, user-facing agents, and media outputs from a fixed catalog; produces UISpec for Compiler
+- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; emits frontend (web/index.html, ui_manifest.json, serve.py) when UISpec is present; copies referenced skill_lib files into output
+- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with three HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-3 UI design) and per-node re-decompose; saves fully-hydrated atomics to skill_lib after each approved layer
 - [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection; real-time job status polling + debug logs
 - [src/skill_lib.py](src/skill_lib.py) — SkillLib class for reading, writing, and searching reusable atomic skills persisted across projects
+- [src/interaction_catalog.py](src/interaction_catalog.py) — fixed catalog of input affordances (TEXT, FILE_UPLOAD, IMAGE_UPLOAD) and output renderers (TEXT, MARKDOWN, TABLE, CODE, IMAGE, FILE_DOWNLOAD) that UIDesigner selects from
 
 ### Generated Output (Google ADK)
 The compiler emits a fully self-contained **Google ADK** project:
@@ -346,7 +403,8 @@ recur-agent/
 │   │   ├── prompt_engineer.py           # PromptEngineerAgent (state_reads / state_writes)
 │   │   ├── tool_implementor.py          # ToolImplementorAgent (sonnet, 1 node/call, syntax retry)
 │   │   ├── debug.py                     # DebugAgent (analyze import failures, auto-repair)
-│   │   └── compiler.py                  # CompilerAgent (Jinja2 walk, dep/env scan, skill_lib copy)
+│   │   ├── ui_designer.py               # UIDesignerAgent (catalog selection, UISpec generation)
+│   │   └── compiler.py                  # CompilerAgent (Jinja2 walk, dep/env/UI scan, skill_lib copy)
 │   ├── ui/
 │   │   ├── server.py                    # FastAPI HITL dashboard + sandbox + job polling + debug logs
 │   │   └── templates/
@@ -354,6 +412,7 @@ recur-agent/
 │   │       ├── dashboard.html           # HITL-1 + HITL-2 review UI + credential form + debug panel
 │   │       └── chat.html                # Embedded chat for testing generated agents
 │   ├── skill_lib.py                     # SkillLib: read/write/search reusable skill definitions
+│   ├── interaction_catalog.py           # Fixed catalog of input affordances + output renderers
 │   └── compiler_templates/
 │       ├── adk_tool_stub.py.j2          # def {name}() + FunctionTool + LlmAgent wrapper
 │       ├── adk_llm_agent_stub.py.j2     # LlmAgent with instruction + state wiring
@@ -477,6 +536,7 @@ credential form.
 | `PromptEngineerAgent` | `claude-haiku-4-5` (default) | Instruction writing; moderate complexity |
 | `ToolImplementorAgent` | `claude-sonnet-4-6` | Code generation requires highest quality; 1 node/call |
 | `DebugAgent` | `claude-haiku-4-5` (default) | Analyze import failures; generate patches; lightweight analysis |
+| `UIDesignerAgent` | `claude-haiku-4-5` (default) | Select UI affordances from catalog; structured output (UISpec); runs once after tree is complete |
 
 ---
 
