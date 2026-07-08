@@ -726,11 +726,14 @@ async def _sandbox_stop_proc() -> None:
 class EditPayload(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    exec_type: Optional[str] = None
 
 
 @app.post("/edit/{node_id}")
 async def edit_node(node_id: str, payload: EditPayload) -> dict:
-    """Manual override of a node's name/description. No LLM re-run."""
+    """Manual override of a node's name/description/exec_type. No LLM re-run."""
+    from src.orchestrator.state import ExecType
+
     ev = _require_events()
     if ev.current_tree is None:
         raise HTTPException(status_code=404, detail="No active tree")
@@ -741,21 +744,30 @@ async def edit_node(node_id: str, payload: EditPayload) -> dict:
         node.name = payload.name
     if payload.description is not None:
         node.description = payload.description
+    if payload.exec_type is not None:
+        try:
+            node.exec_type = ExecType(payload.exec_type)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid exec_type: {payload.exec_type}")
     return {"ok": True, "node_id": node_id}
 
 
 class EditChildrenPayload(BaseModel):
     description: Optional[str] = None
-    children: list[dict]  # list of {id, name, description}
+    children: list[dict]  # list of {id?: str, name: str, description: str}
+    composition_type: Optional[str] = None
 
 
 @app.post("/edit_children/{node_id}")
 async def edit_children(node_id: str, payload: EditChildrenPayload) -> dict:
-    """Edit a composite node's description and its children's names/descriptions.
+    """Edit a composite node's description, children (add/remove/update), and composition type.
 
-    Requires at least 2 children. Each entry in `children` must have `id` matching
-    an existing child node; only `name` and `description` are updated.
+    Requires at least 2 children in the final result. Entries with `id` matching an existing child
+    are updated; entries without `id` are created as new children. Existing children omitted from
+    the list are removed. Finally, all children are synced.
     """
+    from src.orchestrator.state import CompositionType, NodeType, SkillNode
+
     ev = _require_events()
     if ev.current_tree is None:
         raise HTTPException(status_code=404, detail="No active tree")
@@ -768,18 +780,115 @@ async def edit_children(node_id: str, payload: EditChildrenPayload) -> dict:
     if payload.description is not None:
         node.description = payload.description
 
+    if payload.composition_type is not None:
+        try:
+            node.composition_type = CompositionType(payload.composition_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid composition_type: {payload.composition_type}"
+            )
+
+    # Build a map of existing children by id
     child_by_id = {c.id: c for c in node.children}
+
+    # Collect ids of children to keep (from the submission)
+    submitted_ids = set()
     for entry in payload.children:
         child_id = entry.get("id")
-        child = child_by_id.get(child_id)
-        if child is None:
-            raise HTTPException(status_code=404, detail=f"Child node {child_id} not found")
-        if entry.get("name") is not None:
-            child.name = entry["name"]
-        if entry.get("description") is not None:
-            child.description = entry["description"]
+        if child_id:
+            submitted_ids.add(child_id)
+
+    # Remove children that are not in the submission
+    node.children = [c for c in node.children if c.id in submitted_ids]
+
+    # Update existing children and create new ones
+    for entry in payload.children:
+        child_id = entry.get("id")
+        child_name = entry.get("name", "Unnamed").strip()
+        child_desc = entry.get("description", "").strip()
+
+        if child_id:
+            # Update existing child
+            child = child_by_id.get(child_id)
+            if child is None:
+                raise HTTPException(status_code=404, detail=f"Child node {child_id} not found")
+            if child_name:
+                child.name = child_name
+            if child_desc:
+                child.description = child_desc
+        else:
+            # Create new child
+            new_child = SkillNode(
+                name=child_name or "New Sub-skill",
+                description=child_desc,
+                node_type=NodeType.UNKNOWN,
+                depth=node.depth + 1,
+                parent_id=node.id,
+            )
+            node.children.append(new_child)
 
     return {"ok": True, "node_id": node_id}
+
+
+class ConvertNodePayload(BaseModel):
+    target_type: str  # "atomic" | "composite"
+    exec_type: Optional[str] = None  # required/used when target_type == "atomic"
+    composition_type: Optional[str] = None  # used when target_type == "composite"
+
+
+@app.post("/convert_node/{node_id}")
+async def convert_node(node_id: str, payload: ConvertNodePayload) -> dict:
+    """Convert a node between atomic and composite types.
+
+    Atomic → Composite: adds 2 placeholder children, clears exec_type/implementation/instruction.
+    Composite → Atomic: clears children/composition_type, sets exec_type (default LLM_PROMPT).
+    """
+    from src.orchestrator.state import CompositionType, ExecType, NodeType, SkillNode
+
+    ev = _require_events()
+    if ev.current_tree is None:
+        raise HTTPException(status_code=404, detail="No active tree")
+    node = ev.current_tree.root.find_node_by_id(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Node {node_id} not found")
+
+    target_type = payload.target_type.lower()
+
+    if target_type == "composite":
+        # Atomic → Composite
+        node.node_type = NodeType.COMPOSITE
+        node.composition_type = CompositionType(
+            payload.composition_type or "SEQUENTIAL"
+        ) if payload.composition_type else CompositionType.SEQUENTIAL
+        node.exec_type = None
+        node.implementation = None
+        node.instruction = None
+
+        # Add 2 placeholder children if not enough
+        if len(node.children) < 2:
+            for i in range(2 - len(node.children)):
+                placeholder = SkillNode(
+                    name=f"Sub-skill {len(node.children) + 1}",
+                    description="",
+                    node_type=NodeType.UNKNOWN,
+                    depth=node.depth + 1,
+                    parent_id=node.id,
+                )
+                node.children.append(placeholder)
+
+    elif target_type == "atomic":
+        # Composite → Atomic
+        node.node_type = NodeType.ATOMIC
+        node.children = []
+        node.composition_type = None
+        node.exec_type = ExecType(payload.exec_type or "LLM_PROMPT")
+
+    else:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid target_type: {target_type}. Use 'atomic' or 'composite'."
+        )
+
+    return {"ok": True, "node_id": node_id, "new_type": target_type}
 
 
 class EditImplPayload(BaseModel):

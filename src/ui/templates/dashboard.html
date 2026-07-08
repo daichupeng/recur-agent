@@ -531,6 +531,104 @@
       background: var(--blue-bg);
     }
 
+    /* Type toggle button (HITL-1) */
+    .type-toggle-btn {
+      font-family: var(--font);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 3px 8px;
+      border-radius: 20px;
+      border: 1px solid transparent;
+      margin-top: 1px;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      background: var(--surface-2);
+      color: var(--text-secondary);
+      border-color: var(--border);
+    }
+
+    .type-toggle-btn:hover {
+      background: var(--bg);
+      border-color: var(--border-strong);
+      color: var(--text-primary);
+    }
+
+    /* Exec type selector (HITL-1) */
+    select.exec-type-select {
+      font-family: var(--font);
+      font-size: 10px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      margin-top: 1px;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    select.exec-type-select:focus {
+      border-color: var(--claude-orange);
+      background: #fdf8f6;
+    }
+
+    /* Add child button */
+    .btn-add-child {
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 12px;
+      background: var(--surface-2);
+      color: var(--blue);
+      border: 1.5px solid var(--blue-border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 0.1s;
+      margin-top: 6px;
+      width: 100%;
+    }
+
+    .btn-add-child:hover {
+      background: var(--blue-bg);
+    }
+
+    /* Remove child button */
+    .btn-remove-child {
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 6px;
+      background: transparent;
+      color: var(--red);
+      border: 1px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.1s;
+      flex-shrink: 0;
+    }
+
+    .btn-remove-child:hover {
+      background: var(--red-bg);
+      border-color: var(--red-border);
+    }
+
+    .child-row-wrapper {
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+    }
+
+    .child-row-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
     /* Editable fields inside HITL-2 impl cards */
     .impl-editable-field {
       width: 100%;
@@ -1463,10 +1561,19 @@
       {% for node in nodes %}
       <div class="node-card {{ node.node_type.value }}" id="card-{{ node.id }}">
         <div class="card-top">
-          <span class="type-badge {{ node.node_type.value }}">{{ node.node_type.value }}</span>
-          {% if node.exec_type %}
-            <span class="exec-badge">{{ node.exec_type.value.replace('_', ' ').lower() }}</span>
+          <!-- Type toggle button (HITL-1 feature: change atomic ↔ composite) -->
+          <button class="type-toggle-btn" onclick="convertNode('{{ node.id }}', '{{ node.node_type.value }}', this)" title="Click to toggle between atomic and composite">{{ node.node_type.value }}</button>
+
+          <!-- Exec type selector for atomic nodes (HITL-1 feature) -->
+          {% if node.node_type.value == "atomic" %}
+          <select class="exec-type-select" data-node-id="{{ node.id }}" title="Select execution type">
+            <option value="">— select type —</option>
+            {% for et in ["LLM_PROMPT", "EXTERNAL_API", "DETERMINISTIC_CODE"] %}
+            <option value="{{ et }}" {% if node.exec_type and node.exec_type.value == et %}selected{% endif %}>{{ et.replace('_', ' ').lower() }}</option>
+            {% endfor %}
+          </select>
           {% endif %}
+
           <span class="node-name"
                 contenteditable="true"
                 data-node-id="{{ node.id }}"
@@ -1484,16 +1591,23 @@
           <div class="children-edit-list" id="children-{{ node.id }}">
             {% for child in node.children %}
             <div class="child-edit-row" data-child-id="{{ child.id }}">
-              <span class="child-name"
-                    contenteditable="true"
-                    spellcheck="false"
-                    title="Sub-skill name">{{ child.name }}</span>
-              <textarea class="child-desc"
-                        rows="1"
-                        title="Sub-skill description">{{ child.description }}</textarea>
+              <div class="child-row-wrapper">
+                <div class="child-row-content">
+                  <span class="child-name"
+                        contenteditable="true"
+                        spellcheck="false"
+                        title="Sub-skill name">{{ child.name }}</span>
+                  <textarea class="child-desc"
+                            rows="1"
+                            title="Sub-skill description">{{ child.description }}</textarea>
+                </div>
+                <button class="btn-remove-child" onclick="removeChildRow(this, '{{ node.id }}')" title="Remove this sub-skill">×</button>
+              </div>
             </div>
             {% endfor %}
           </div>
+          <!-- Add child button (HITL-1 feature) -->
+          <button class="btn-add-child" onclick="addChildRow('{{ node.id }}')">+ Add sub-skill</button>
         </div>
         {% endif %}
 
@@ -1691,9 +1805,12 @@ async function doRollback(btn) {
 async function saveNode(nodeId, btn) {
   const nameEl = document.querySelector(`[data-node-id="${nodeId}"][data-field="name"]`);
   const descEl = document.querySelector(`[data-node-id="${nodeId}"][data-field="description"]`);
+  const execSelect = document.querySelector(`select.exec-type-select[data-node-id="${nodeId}"]`);
+
   const payload = {
     name: nameEl ? nameEl.innerText.trim() : undefined,
     description: descEl ? descEl.value.trim() : undefined,
+    exec_type: execSelect && execSelect.value ? execSelect.value : undefined,
   };
 
   btn.textContent = 'Saving…';
@@ -1727,7 +1844,7 @@ async function saveNode(nodeId, btn) {
   }
 }
 
-// ── Composite node editing (HITL-1) ──────────────────────────────────────────
+// ── Composite node editing (HITL-1): handle name/desc/children add/remove ──────
 async function saveComposite(nodeId, btn) {
   const descEl = document.querySelector(`[data-node-id="${nodeId}"][data-field="description"]`);
   const container = document.getElementById('children-' + nodeId);
@@ -1738,11 +1855,15 @@ async function saveComposite(nodeId, btn) {
       const childId = row.dataset.childId;
       const nameEl = row.querySelector('.child-name');
       const descEl = row.querySelector('.child-desc');
-      children.push({
-        id: childId,
-        name: nameEl ? nameEl.innerText.trim() : undefined,
-        description: descEl ? descEl.value.trim() : undefined,
-      });
+      const entry = {
+        name: nameEl ? nameEl.innerText.trim() : 'Unnamed',
+        description: descEl ? descEl.value.trim() : '',
+      };
+      // Only include id if it's an existing child; omit for new ones (no data-child-id)
+      if (childId) {
+        entry.id = childId;
+      }
+      children.push(entry);
     });
   }
 
@@ -1784,6 +1905,72 @@ async function saveComposite(nodeId, btn) {
     btn.textContent = 'Save edits';
     btn.disabled = false;
   }
+}
+
+// ── HITL-1: Type conversion (atomic ↔ composite) ──────────────────────────────
+async function convertNode(nodeId, currentType, btn) {
+  const newType = currentType === 'atomic' ? 'composite' : 'atomic';
+  const msg = newType === 'composite'
+    ? 'Convert to composite? This will clear exec_type and add 2 placeholder sub-skills.'
+    : 'Convert to atomic? This will clear all children and set to LLM_PROMPT exec_type.';
+
+  if (!confirm(msg)) return;
+
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/convert_node/${nodeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_type: newType }),
+    });
+
+    if (r.ok) {
+      toast(`Converted to ${newType} — reloading…`, 'success');
+      setTimeout(() => location.reload(), 800);
+    } else {
+      const d = await r.json().catch(() => ({ detail: 'Conversion failed' }));
+      toast(d.detail || 'Conversion failed', 'error');
+      btn.disabled = false;
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+  }
+}
+
+// ── HITL-1: Add a new child row (for composite nodes) ──────────────────────────
+function addChildRow(nodeId) {
+  const container = document.getElementById('children-' + nodeId);
+  if (!container) return;
+
+  const newRow = document.createElement('div');
+  newRow.className = 'child-edit-row';
+  // No data-child-id — signals to saveComposite that this is a new child
+  newRow.innerHTML = `
+    <div class="child-row-wrapper">
+      <div class="child-row-content">
+        <span class="child-name" contenteditable="true" spellcheck="false" title="Sub-skill name">New Sub-skill</span>
+        <textarea class="child-desc" rows="1" title="Sub-skill description"></textarea>
+      </div>
+      <button class="btn-remove-child" onclick="removeChildRow(this, '${nodeId}')" title="Remove this sub-skill">×</button>
+    </div>
+  `;
+  container.appendChild(newRow);
+}
+
+// ── HITL-1: Remove a child row (with >= 2 check) ──────────────────────────────
+function removeChildRow(btn, nodeId) {
+  const container = document.getElementById('children-' + nodeId);
+  if (!container) return;
+
+  const rows = container.querySelectorAll('.child-edit-row');
+  if (rows.length <= 2) {
+    toast('A composite node must have at least 2 sub-skills.', 'error');
+    return;
+  }
+
+  btn.closest('.child-edit-row').remove();
+  toast('Sub-skill removed', 'info');
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────

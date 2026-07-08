@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(docker exec *)"
+      "Bash(docker exec *)",
+      "Bash(python -m py_compile src/ui/server.py)",
+      "Bash(python -m py_compile src/ui/templates/dashboard.html)",
+      "Bash(python main.py --help)",
+      "Bash(python test_hitl1_features.py)"
     ]
   }
 }
