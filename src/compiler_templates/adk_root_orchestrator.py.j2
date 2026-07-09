@@ -4,9 +4,20 @@ Auto-generated Google ADK orchestration harness.
 DO NOT edit manually; re-run the recur-agent compiler to regenerate.
 """
 import asyncio
+{%- if has_memory %}
+import argparse
+import sys
+{%- endif %}
 
 from dotenv import load_dotenv
 load_dotenv()
+{%- if has_memory %}
+
+# Initialise persistent memory before anything imports the agents. State is stored as
+# human-readable Markdown tables under the fixed dir <project>/memory_store/.
+from memory import init_memory, clear_memory
+init_memory()
+{%- endif %}
 
 from google.adk.runners import InMemoryRunner
 from google.genai.types import Content, Part
@@ -54,5 +65,38 @@ async def _interactive_loop() -> None:
                     if part.text:
                         print(f"Agent: {part.text}\n")
 
+{%- if has_memory %}
+def _main() -> None:
+    parser = argparse.ArgumentParser(description="Run {{ project_name }}.")
+    _ALL = "\0all"  # sentinel: bare --clear-memory means "wipe everything"
+    parser.add_argument(
+        "--clear-memory",
+        metavar="ENTITY",
+        nargs="?",
+        const=_ALL,
+        default=None,
+        help="Delete persisted data for ENTITY, then exit. Pass no value (or 'all') to wipe everything.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="With --clear-memory, wipe every entity.",
+    )
+    args = parser.parse_args()
+
+    if args.clear_memory is not None:
+        wipe_all = args.all or args.clear_memory in (_ALL, "all", "")
+        target = None if wipe_all else args.clear_memory
+        removed = clear_memory(target)
+        print(f"Cleared {removed} row(s) from memory ({'all' if target is None else target}).")
+        sys.exit(0)
+
+    asyncio.run(_interactive_loop())
+
+
+if __name__ == "__main__":
+    _main()
+{%- else %}
 if __name__ == "__main__":
     asyncio.run(_interactive_loop())
+{%- endif %}

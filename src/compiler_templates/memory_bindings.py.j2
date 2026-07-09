@@ -1,0 +1,149 @@
+"""Deterministic memory load/save callbacks for {{ project_name }} — auto-generated.
+
+The compiler wires these onto agents via ADK before_agent_callback / after_agent_callback.
+NO LLM decides when to persist; nothing here lives inside a tool body. Each callback is
+null-safe: a missing state key or storage error is logged and skipped, never raised, so
+memory can never break an agent run.
+
+Persistence flows through ONE session-state key holding a dict (whose keys are the entity's
+fields):
+  - after-callback reads state[save_source_key] (a dict, enforced via the producer's
+    output_key/output_schema) and writes it as a row/record.
+  - before-callback reads storage and sets state[load_target_key] to the recalled dict
+    (KEY_VALUE) or the list of rows (APPEND_LOG / SEMANTIC).
+
+Registries are keyed by node id (uuid). The generated agent stubs look themselves up:
+    before_agent_callback=BEFORE_CALLBACKS.get("<node_id>")
+    after_agent_callback=AFTER_CALLBACKS.get("<node_id>")
+DO NOT edit manually; re-run the recur-agent compiler to regenerate.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable
+
+{% for entity in entities %}
+from memory.{{ entity.table }} import {{ entity.table }}_adapter
+{%- endfor %}
+
+logger = logging.getLogger("memory.bindings")
+
+_FIELDS_BY_ENTITY = {
+{%- for entity in entities %}
+    "{{ entity.table }}": {{ entity.field_names | tojson }},
+{%- endfor %}
+}
+
+
+def _state_get(state: Any, key: str, default: Any = None) -> Any:
+    try:
+        return state.get(key, default)
+    except Exception:
+        return default
+
+
+def _key_for(state: Any, ctx: Any, key_field: str | None, record: dict | None) -> Any:
+    """Primary key for KEY_VALUE ops: the key_field value from the record/state, else user id."""
+    if key_field:
+        if record and record.get(key_field) is not None:
+            return record[key_field]
+        val = _state_get(state, key_field)
+        if val is not None:
+            return val
+    return getattr(ctx, "user_id", None) or "default"
+
+
+def _coerce_record(value: Any, fields: list) -> dict:
+    """Turn the save_source_key value into a flat {field: value} record.
+
+    A dict is projected onto the entity fields; a scalar/list is stored under the single
+    non-key field (the load-only / opaque `value` column case).
+    """
+    if isinstance(value, dict):
+        return {f: value.get(f) for f in fields if f in value or f == "_key"}
+    # Non-dict value → single-column entities use `value`.
+    if fields:
+        target = "value" if "value" in fields else fields[0]
+        return {target: value}
+    return {}
+
+
+def _make_before(adapter, backend: str, table: str, load_target_key: str | None, key_field: str | None) -> Callable:
+    def _before(callback_context):
+        if not load_target_key:
+            return None
+        try:
+            state = callback_context.state
+            if backend == "KEY_VALUE":
+                rec = adapter.get(_key_for(state, callback_context, key_field, None))
+                if rec:
+                    rec = {k: v for k, v in rec.items() if k != "_key"}
+                    state[load_target_key] = rec
+            else:  # APPEND_LOG / SEMANTIC: expose recent rows
+                rows = adapter.query() if hasattr(adapter, "query") else adapter._store.read_all()
+                state[load_target_key] = rows
+        except Exception as exc:  # never break the run on a memory error
+            logger.warning("memory before-callback skipped: %s", exc)
+        return None
+    return _before
+
+
+def _make_after(adapter, backend: str, table: str, save_source_key: str | None, key_field: str | None) -> Callable:
+    def _after(callback_context):
+        if not save_source_key:
+            return None
+        try:
+            state = callback_context.state
+            value = _state_get(state, save_source_key)
+            if value is None:
+                return None  # producer wrote nothing this run; don't persist an empty row
+            fields = _FIELDS_BY_ENTITY.get(table, [])
+            record = _coerce_record(value, fields)
+            record = {k: v for k, v in record.items() if v is not None}
+            if not record:
+                return None
+            if backend == "KEY_VALUE":
+                adapter.set(_key_for(state, callback_context, key_field, record), **record)
+            elif backend == "APPEND_LOG":
+                adapter.append(**record)
+            else:  # SEMANTIC
+                adapter.add(**record)
+        except Exception as exc:
+            logger.warning("memory after-callback skipped: %s", exc)
+        return None
+    return _after
+
+
+def _compose(callbacks: list) -> Callable | None:
+    """Run several callbacks in order (multiple entities bound to one node)."""
+    callbacks = [c for c in callbacks if c is not None]
+    if not callbacks:
+        return None
+    if len(callbacks) == 1:
+        return callbacks[0]
+
+    def _composed(callback_context):
+        for cb in callbacks:
+            cb(callback_context)
+        return None
+    return _composed
+
+
+# ── per-node registries (keyed by node id) ───────────────────────────────────
+
+_BEFORE: dict[str, list] = {}
+_AFTER: dict[str, list] = {}
+
+{% for entity in entities %}
+{%- for b in entity.bindings %}
+_BEFORE.setdefault("{{ b.node_id }}", []).append(
+    _make_before({{ entity.table }}_adapter, "{{ entity.backend_value }}", "{{ entity.table }}", {{ b.load_target_key | pyliteral }}, {{ b.key_field | pyliteral }})
+)
+_AFTER.setdefault("{{ b.node_id }}", []).append(
+    _make_after({{ entity.table }}_adapter, "{{ entity.backend_value }}", "{{ entity.table }}", {{ b.save_source_key | pyliteral }}, {{ b.key_field | pyliteral }})
+)
+{%- endfor %}
+{%- endfor %}
+
+BEFORE_CALLBACKS: dict[str, Callable] = {nid: _compose(cbs) for nid, cbs in _BEFORE.items()}
+AFTER_CALLBACKS: dict[str, Callable] = {nid: _compose(cbs) for nid, cbs in _AFTER.items()}

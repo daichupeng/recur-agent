@@ -101,6 +101,15 @@ linted deterministically before human review, so make the keys chain correctly:
 
 Use consistent snake_case key names so a producer's write key exactly matches a consumer's read key.
 
+## Persistence scope (every state key)
+
+For each state key in a node's contract, also declare its durability in a `scopes` object
+mapping the key to "EPHEMERAL" or "PERSISTENT". Default every state key to EPHEMERAL. Only
+mark a key PERSISTENT if the node description explicitly implies durability across separate
+invocations (words like 'remember', 'history', 'next time', 'over time', 'previously seen').
+Do not mark PERSISTENT speculatively. You may omit a key from `scopes` entirely to leave it
+EPHEMERAL — only list the keys you are marking PERSISTENT.
+
 You MUST respond with a JSON array parallel to the input array — one entry per input node:
 [
   {
@@ -129,6 +138,10 @@ _CONTRACT_SCHEMA: dict[str, Any] = {
     "properties": {
         "reads": {"type": "object", "additionalProperties": {"type": "string"}},
         "writes": {"type": "object", "additionalProperties": {"type": "string"}},
+        "scopes": {
+            "type": "object",
+            "additionalProperties": {"type": "string", "enum": ["EPHEMERAL", "PERSISTENT"]},
+        },
     },
     "required": ["reads", "writes"],
     "additionalProperties": False,
@@ -179,7 +192,13 @@ def _parse_contract(raw: Optional[dict[str, Any]]) -> Optional[Contract]:
         return None
     reads = {str(k): str(v) for k, v in (raw.get("reads") or {}).items()}
     writes = {str(k): str(v) for k, v in (raw.get("writes") or {}).items()}
-    return Contract(reads=reads, writes=writes)
+    # Only keep explicitly PERSISTENT scopes; EPHEMERAL is the implied default.
+    scopes = {
+        str(k): str(v)
+        for k, v in (raw.get("scopes") or {}).items()
+        if str(v) == "PERSISTENT"
+    }
+    return Contract(reads=reads, writes=writes, scopes=scopes)
 
 
 class DecomposerAgent(BaseAgent):

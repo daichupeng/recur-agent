@@ -30,6 +30,16 @@ class CompositionType(str, Enum):
     LLM_COORDINATOR = "LLM_COORDINATOR"  # LlmAgent decides which child to invoke
 
 
+class MemoryScope(str, Enum):
+    """Durability of a session-state key across separate product invocations.
+
+    EPHEMERAL keys live only for one run (ADK session state). PERSISTENT keys must
+    survive across runs — they are what the MemoryArchitectAgent designs storage for.
+    """
+    EPHEMERAL = "EPHEMERAL"    # default — lives for one run only
+    PERSISTENT = "PERSISTENT"  # must be persisted across separate invocations
+
+
 class Contract(BaseModel):
     """Data-flow contract for a node: the session-state keys it consumes and produces.
 
@@ -45,6 +55,7 @@ class Contract(BaseModel):
     """
     reads: dict[str, str] = Field(default_factory=dict)   # state_key -> type/description
     writes: dict[str, str] = Field(default_factory=dict)  # state_key -> type/description
+    scopes: dict[str, str] = Field(default_factory=dict)  # state_key -> MemoryScope value; absent ⇒ EPHEMERAL
     frozen: bool = False  # locked once the parent's HITL-1 layer is approved
 
 
@@ -90,6 +101,8 @@ class SkillNode(BaseModel):
     implementation: Optional[str] = None  # Set by ToolImplementorAgent; Python function body for tool atomics
     state_reads: list[str] = Field(default_factory=list)    # ADK session state keys this node reads
     state_writes: list[str] = Field(default_factory=list)   # ADK session state keys this node writes
+    state_scopes: dict[str, str] = Field(default_factory=dict)  # Set by PromptEngineerAgent; state_key -> MemoryScope value (absent ⇒ EPHEMERAL)
+    memory_entity_ref: Optional[str] = None  # Set by MemoryArchitectAgent; NAME of the MemorySpec entity this node reads/writes
     instruction: Optional[str] = None  # Set by PromptEngineerAgent; engineered system prompt for LLM agents
     skill_lib_ref: Optional[str] = None  # Name of the skill_lib entry this node was sourced from
     visibility: NodeVisibility = NodeVisibility.INTERNAL  # Set by UIDesignerAgent; governs frontend display
@@ -178,6 +191,71 @@ class UISpec(BaseModel):
     accept_mime_types: list[str] = Field(default_factory=list)  # e.g. ["image/*", "application/pdf"]
 
 
+class MemoryBackend(str, Enum):
+    """Storage backend for a persistent memory entity (fixed catalog; see src/memory_catalog.py)."""
+    KEY_VALUE = "KEY_VALUE"    # default — point lookups, profiles, dedup flags, settings
+    APPEND_LOG = "APPEND_LOG"  # growing history / audit trail
+    SEMANTIC = "SEMANTIC"      # fuzzy / similarity recall (never a default)
+
+
+class MemoryField(BaseModel):
+    """One flat field in a memory entity's schema."""
+    name: str
+    type: str  # "str" | "int" | "float" | "bool" | "datetime" | "json"
+
+
+class MemoryBinding(BaseModel):
+    """Declarative wiring: when to load/save an entity around one node's lifecycle.
+
+    The compiler turns each binding into deterministic ADK before_agent_callback /
+    after_agent_callback functions on the node (`node_id`, a stable uuid). No LLM decides
+    when to persist, and no adapter calls are written into tool bodies.
+
+    Persistence flows through ONE session-state key holding a dict (whose keys are the
+    entity's fields), not N top-level keys:
+
+    - save_source_key: the state key (a dict, produced during the run and enforced via the
+      producer's output_key/output_schema) PERSISTED into the entity after the node runs.
+      None = load-only (recall) binding.
+    - load_target_key: the state key POPULATED from storage before the node runs (so a
+      consumer can read prior state). None = save-only binding.
+    - key_field: KEY_VALUE only — which entity field is the primary key. When null, the
+      callback uses the ADK user_id (per-user memory).
+    """
+    node_id: str
+    save_source_key: Optional[str] = None
+    load_target_key: Optional[str] = None
+    key_field: Optional[str] = None
+
+
+class MemoryEntity(BaseModel):
+    """A single persisted entity designed by MemoryArchitectAgent.
+
+    Compiled into memory/<snake(name)>.py by the CompilerAgent using the template
+    selected from its backend. Persistence is wired via `bindings` (deterministic
+    before/after_agent callbacks); `owner_nodes` is derived from bindings for display.
+    """
+    name: str
+    backend: MemoryBackend = MemoryBackend.KEY_VALUE
+    fields: list[MemoryField] = Field(default_factory=list)
+    keys_covered: list[str] = Field(default_factory=list)   # PERSISTENT state keys this entity backs
+    bindings: list[MemoryBinding] = Field(default_factory=list)  # deterministic load/save wiring per node
+    owner_nodes: list[str] = Field(default_factory=list)    # node IDs (uuid); derived from bindings, for display
+    retention: Optional[str] = None                          # e.g. "90 days"; null = indefinite
+    deletion_scope: str = "entire entity"                    # which fields constitute "a user's data" (§6)
+    deletion_confirmed: bool = False                         # HITL-4 forcing-function: human confirmed deletion scope
+
+
+class MemorySpec(BaseModel):
+    """Whole-product persistence contract; None on SkillTree = no persistent memory.
+
+    Selected by MemoryArchitectAgent after the tree is finalized and before the UI
+    Designer runs; overridable in HITL-4. A tree with memory_spec=None compiles exactly
+    as before (no memory/ package, no init_memory, no adapter injection).
+    """
+    entities: list[MemoryEntity] = Field(default_factory=list)
+
+
 class SkillTree(BaseModel):
     project_name: str
     requirement: str
@@ -186,6 +264,7 @@ class SkillTree(BaseModel):
     history: list[LayerSnapshot] = Field(default_factory=list)
     required_env_vars: list[str] = Field(default_factory=list)
     ui_spec: Optional[UISpec] = None  # None → back-compat: no generated frontend
+    memory_spec: Optional[MemorySpec] = None  # None → back-compat: no persistent memory
 
     def snapshot_current_layer(self) -> None:
         """Capture the tree state before decomposing current_layer."""

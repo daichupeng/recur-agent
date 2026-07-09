@@ -117,10 +117,14 @@ class BaseAgent:
                     )
                     if tool_block is not None:
                         import anthropic as _ant
-                        # Unwrap the envelope if we wrapped an array schema
+                        # Unwrap the envelope if we wrapped an array schema.
+                        # Haiku occasionally serialises the inner array as a JSON string
+                        # instead of a real list — parse it when that happens.
                         payload = tool_block.input
                         if output_schema.get("type") == "array" and "results" in payload:
                             payload = payload["results"]
+                            if isinstance(payload, str):
+                                payload = json.loads(payload)
                         text_content = _ant.types.TextBlock(
                             type="text",
                             text=json.dumps(payload),

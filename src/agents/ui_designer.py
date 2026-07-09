@@ -63,6 +63,13 @@ Decide four things:
 Also write a short product `title` and one-line `tagline`, and 2-3 `example_prompts` a user could
 try (phrased for the end user, grounded in the requirement).
 
+## Persistent memory (if present)
+If the product persists memory entities, they are listed under "Persistent memory" in the input.
+When present you MAY enable a TABLE or MARKDOWN renderer to display an entity's read-out (e.g.
+"show my alert history"), and you SHOULD add at least one example prompt exercising it. The product
+also always supports clearing persisted data via CLI/REST, so a "clear my data" example prompt is
+reasonable when an entity holds user-specific data.
+
 ## Catalog
 
 {catalog}
@@ -129,6 +136,20 @@ class UIDesignerAgent(BaseAgent):
             "Skill tree (every node that will run):\n"
             + json.dumps(summary, indent=2)
         )
+        if tree.memory_spec is not None and tree.memory_spec.entities:
+            mem = [
+                {
+                    "name": e.name,
+                    "backend": e.backend.value,
+                    "fields": [{"name": f.name, "type": f.type} for f in e.fields],
+                    "retention": e.retention,
+                }
+                for e in tree.memory_spec.entities
+            ]
+            user_content += (
+                "\n\nPersistent memory (entities this product stores across runs):\n"
+                + json.dumps(mem, indent=2)
+            )
 
         message = await self._call(
             messages=[{"role": "user", "content": user_content}],

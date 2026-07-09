@@ -11,11 +11,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Awaitable, Optional
 
-from src.agents.compiler import CompilerAgent
+from src.agents.compiler import CompilerAgent, _snake_name
 from src.agents.complexity_reviewer import ComplexityReviewAgent
 from src.agents.contract_linter import ContractLinterAgent
 from src.agents.debug import DebugAgent, EnvProvider
 from src.agents.decomposer import DecomposerAgent
+from src.agents.memory_architect import MemoryArchitectAgent
 from src.agents.prompt_engineer import PromptEngineerAgent
 from src.agents.schema_architect import SchemaArchitectAgent
 from src.agents.tool_implementor import ToolImplementorAgent
@@ -59,6 +60,10 @@ class PipelineEvents:
         self.rollback_impl: asyncio.Event = asyncio.Event()
         # HITL-2 per-skill retry: queue of RetrySkillRequest
         self.retry_skill: asyncio.Queue[RetrySkillRequest] = asyncio.Queue()
+
+        # HITL-4: memory/persistence review (whole-tree, before UI design)
+        self.approve_memory: asyncio.Event = asyncio.Event()
+        self.rollback_memory: asyncio.Event = asyncio.Event()
 
         # HITL-3: UI/interaction review (after the whole tree is finalized)
         self.approve_ui: asyncio.Event = asyncio.Event()
@@ -110,6 +115,7 @@ async def run_pipeline(
     schema_architect = SchemaArchitectAgent()
     prompt_engineer = PromptEngineerAgent()
     tool_implementor = ToolImplementorAgent()
+    memory_architect = MemoryArchitectAgent()
     ui_designer = UIDesignerAgent()
     compiler = CompilerAgent()
 
@@ -199,7 +205,8 @@ async def run_pipeline(
         ]
         if llm_atomics:
             logger.info("Running Prompt Engineer on %d LLM atomic nodes...", len(llm_atomics))
-            await prompt_engineer.engineer(llm_atomics)
+            persistent_hint = _build_persistent_keys_hint(tree, llm_atomics)
+            await prompt_engineer.engineer(llm_atomics, persistent_keys_hint=persistent_hint)
 
         # ── STEP 3c: TOOL IMPLEMENTATION ───────────────────────────────────
         events.status = f"tool_implementation_layer_{tree.current_layer}"
@@ -255,6 +262,12 @@ async def run_pipeline(
         tree.current_layer += 1
         events.current_tree = tree
 
+    # ── MEMORY DESIGN (whole-tree, once) ─────────────────────────────────────
+    # Runs after the per-layer loop and BEFORE UI design (spec §4): if any state
+    # key was flagged PERSISTENT, design storage for it so the UI Designer can then
+    # offer renderers/affordances bound to a known entity. Triage-empty → no-op.
+    await _design_memory(tree, events, memory_architect, verified_path)
+
     # ── UI DESIGN (whole-tree, once) ─────────────────────────────────────────
     # Needs the complete tree structure, so it runs after the per-layer loop and
     # before compile. Selects the frontend/interaction contract and marks which
@@ -265,6 +278,18 @@ async def run_pipeline(
     events.status = "compiling"
     logger.info("Compiling Google ADK project...")
     project_dir = compiler.compile(tree, output_dir, skill_lib=skill_lib)
+
+    # ── VALIDATE MEMORY WIRING (deterministic, no LLM) ──────────────────────
+    # Catch broken bindings BEFORE spending any LLM call in the debug loop.
+    if tree.memory_spec is not None:
+        problems = _validate_memory_wiring(tree, project_dir)
+        if problems:
+            events.status = f"memory_wiring_invalid: {problems[0][:100]}"
+            logger.error(
+                "Memory wiring validation failed (%d problem(s)):\n  - %s",
+                len(problems), "\n  - ".join(problems),
+            )
+            return project_dir
 
     # ── VERIFY AND REPAIR ──────────────────────────────────────────────────
     events.status = "verifying"
@@ -521,6 +546,131 @@ async def _hitl_ui(events: PipelineEvents) -> bool:
     return events.approve_ui.is_set()
 
 
+async def _hitl_memory(events: PipelineEvents) -> bool:
+    """HITL-4: memory/persistence review. Returns True if approved, False if regenerate requested."""
+    done, pending = await asyncio.wait(
+        [
+            asyncio.create_task(_wait_event(events.approve_memory)),
+            asyncio.create_task(_wait_event(events.rollback_memory)),
+        ],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
+    return events.approve_memory.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Memory design (HITL-4)
+# ---------------------------------------------------------------------------
+
+async def _design_memory(
+    tree: SkillTree,
+    events: PipelineEvents,
+    memory_architect: MemoryArchitectAgent,
+    verified_path: Path,
+) -> None:
+    """Design the persistent-memory contract (declarative bindings), then HITL-4.
+
+    Mirrors _design_ui. Triage-empty (tree.memory_spec is None after design) skips HITL
+    entirely — no dashboard pause for a product that needs no persistence. A HITL-4
+    rollback re-runs the Memory Architect (cheap, single call).
+
+    Tool bodies are NOT re-implemented for memory: persistence is wired by the compiler as
+    deterministic before/after_agent callbacks (memory/_bindings.py), never as adapter
+    calls inside a tool body. Set env SKIP_MEMORY_REVIEW=1 to auto-approve.
+    """
+    skip_review = bool(os.environ.get("SKIP_MEMORY_REVIEW"))
+
+    while True:
+        events.status = "memory_design"
+        logger.info("Designing persistent-memory contract for %s …", tree.project_name)
+        await memory_architect.design(tree)
+
+        # Triage found nothing → no persistence required. Skip HITL-4 (spec §3/§4).
+        if tree.memory_spec is None:
+            logger.info("No persistent memory required — skipping HITL-4.")
+            tree.save_json(verified_path)
+            events.current_tree = tree
+            return
+
+        tree.save_json(verified_path)
+        events.current_tree = tree
+
+        if skip_review:
+            logger.info("SKIP_MEMORY_REVIEW set — auto-approving memory design.")
+            return
+
+        events.status = "awaiting_memory_review"
+        events.approve_memory.clear()
+        events.rollback_memory.clear()
+        logger.info("Memory design ready for review at http://127.0.0.1:8000")
+
+        approved = await _hitl_memory(events)
+        if approved:
+            return
+        logger.info("Memory design rollback requested — regenerating.")
+
+
+def _validate_memory_wiring(tree: SkillTree, project_dir: Path) -> list[str]:
+    """Deterministically check every memory binding resolves. Returns problem strings.
+
+    Runs BEFORE the LLM debug loop so a broken binding (dangling node id, missing adapter
+    module, empty load+save) fails fast with a clear message instead of burning LLM calls
+    on an unfixable wiring bug. No LLM, no subprocess.
+    """
+    problems: list[str] = []
+    spec = tree.memory_spec
+    if spec is None:
+        return problems
+
+    nodes = tree.root.topological_order()
+    by_id = {n.id: n for n in nodes}
+    mem_dir = project_dir / "memory"
+
+    def _llm_writers(key: str) -> list[SkillNode]:
+        out = []
+        for n in nodes:
+            if n.exec_type != ExecType.LLM_PROMPT:
+                continue
+            writes = set(n.state_writes or []) | (set(n.contract.writes) if n.contract else set())
+            if key in writes:
+                out.append(n)
+        return out
+
+    for entity in spec.entities:
+        table = _snake_name(entity.name)
+        if not (mem_dir / f"{table}.py").exists():
+            problems.append(f"entity '{entity.name}': adapter module memory/{table}.py not emitted")
+        if not entity.bindings:
+            problems.append(f"entity '{entity.name}': no bindings (nothing loads or saves it)")
+        if not entity.fields:
+            problems.append(f"entity '{entity.name}': no derived fields")
+        for b in entity.bindings:
+            if b.node_id not in by_id:
+                problems.append(
+                    f"entity '{entity.name}': binding references unknown node id {b.node_id[:8]}…"
+                )
+            if not b.save_source_key and not b.load_target_key:
+                problems.append(f"entity '{entity.name}': a binding has neither save nor load key")
+            # A save_source_key must be produced by an LLM node, else it can never reach
+            # state (tool returns aren't captured) — this is exactly the runner_coach bug.
+            if b.save_source_key and not _llm_writers(b.save_source_key):
+                problems.append(
+                    f"entity '{entity.name}': save_source_key '{b.save_source_key}' is written by "
+                    "no LLM node — it will never be captured to state (make the binding load-only)."
+                )
+            if b.key_field and b.key_field not in {f.name for f in entity.fields}:
+                problems.append(
+                    f"entity '{entity.name}': key_field '{b.key_field}' is not an entity field"
+                )
+
+    if not (mem_dir / "_bindings.py").exists():
+        problems.append("memory/_bindings.py not emitted")
+
+    return problems
+
+
 # ---------------------------------------------------------------------------
 # UI design (HITL-3)
 # ---------------------------------------------------------------------------
@@ -660,6 +810,15 @@ async def _repair_from_traceback(
     """
     import re
 
+    # Memory adapters are template-generated (not SkillNodes), so a failure in
+    # memory/<x>.py cannot be fixed by re-implementing a node. Regenerate the whole
+    # memory package from the current (possibly human-edited) memory_spec instead.
+    if re.search(r'(?:File ".*)?memory/([^"]+)\.py', stderr) and tree.memory_spec is not None:
+        logger.info("Traceback points at a memory adapter — regenerating memory package.")
+        compiler = CompilerAgent()
+        compiler._compile_memory(tree, project_dir)  # type: ignore[attr-defined]
+        return True
+
     # Look for a File "...atomics/<name>.py" reference in the traceback
     match = re.search(r'File ".*atomics/([^"]+)\.py"', stderr)
     if not match:
@@ -699,6 +858,32 @@ async def _wait_event(event: asyncio.Event) -> None:
     await event.wait()
 
 
+def _build_persistent_keys_hint(tree: SkillTree, nodes: list[SkillNode]) -> dict[str, set[str]]:
+    """Return {node_id: set_of_persistent_keys} for each node in `nodes`.
+
+    For each node, unions the PERSISTENT keys declared in the contracts of all its ancestor
+    composites. These are the keys the PromptEngineer MUST mark PERSISTENT in state_scopes
+    so the MemoryArchitect can later find LLM producers and wire save bindings.
+    """
+    hint: dict[str, set[str]] = {}
+    for node in nodes:
+        keys: set[str] = set()
+        # Walk up via parent_id links to collect ancestor contracts' PERSISTENT scopes.
+        current_id = node.parent_id
+        while current_id is not None:
+            ancestor = tree.root.find_node_by_id(current_id)
+            if ancestor is None:
+                break
+            if ancestor.contract:
+                for key, scope in ancestor.contract.scopes.items():
+                    if scope == "PERSISTENT":
+                        keys.add(key)
+            current_id = ancestor.parent_id
+        if keys:
+            hint[node.id] = keys
+    return hint
+
+
 # ---------------------------------------------------------------------------
 # Skill library helpers
 # ---------------------------------------------------------------------------
@@ -715,6 +900,8 @@ def _save_new_skills_to_lib(tree: SkillTree, skill_lib: SkillLib) -> None:
             continue
         if node.skill_lib_ref:
             continue  # already in the library
+        if node.memory_entity_ref is not None:
+            continue  # impl coupled to this project's memory schema; not portable (spec §5)
         if not node.input_schema or not node.output_schema:
             continue  # not fully hydrated yet
 

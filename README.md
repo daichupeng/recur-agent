@@ -154,6 +154,32 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         |
         v
   +------------------------------------------+
+  | Memory Architect Agent  (claude-haiku)   |
+  |  design persistent-memory contract:      |
+  |    triage: collect all PERSISTENT keys   |
+  |             (from LLM state_scopes +     |
+  |              ancestor contract scopes)   |
+  |    design: select backend per entity:    |
+  |             KEY_VALUE, APPEND_LOG, or    |
+  |             SEMANTIC (embedding-backed)  |
+  |    wire: bindings (load/save nodes +     |
+  |           derived fields from schemas)   |
+  |  produce MemorySpec (structured only)    |
+  +------------------------------------------+
+        |
+        v
+  ##################################################
+  #  HITL-4: Memory Review (dashboard, skippable) #
+  ##################################################
+        |
+        +-- ROLLBACK? --> re-run MemoryArchitect +
+        |                                        |
+        +-- APPROVE? ----+
+        |                v
+        |           continue
+        |
+        v
+  +------------------------------------------+
   | UI Designer Agent  (claude-haiku)        |
   |  select frontend/interaction contract:   |
   |    input affordances                     |
@@ -275,6 +301,94 @@ Nodes with media output are re-implemented as `async` functions with a `ToolCont
 
 ---
 
+## Memory Generation (HITL-4)
+
+After the skill tree is fully decomposed and implemented, **MemoryArchitectAgent** designs persistent state storage for any session-state keys marked PERSISTENT across ancestor contracts and LLM node scopes.
+
+### How Memory Scoping Works
+
+When the **Decomposer** classifies a composite node, it declares a `contract.scopes` mapping: which state keys must survive across separate invocations (PERSISTENT) vs. live only for one run (EPHEMERAL). For example, a `coach` agent compositeNode might declare:
+```
+contract.scopes = {
+  "current_training_plan": "PERSISTENT",
+  "updated_training_plan": "PERSISTENT",
+  "generated_plan": "PERSISTENT",
+  ...
+}
+```
+
+When **PromptEngineer** generates instructions for LLM leaf nodes under that composite, it receives a `persistent_keys_required` hint containing all ancestor PERSISTENT keys. The engineer is instructed to honour these by including them in the node's `state_scopes` when it writes them. This ensures:
+- A leaf LLM node under `coach` that writes the plan summary will mark that key PERSISTENT (matching the ancestor's declared scope)
+- The MemoryArchitect can later find an LLM producer and wire a **save binding** (not just load-only recall)
+
+### Memory Design: Triage and Wiring
+
+The MemoryArchitectAgent runs in two steps:
+
+1. **Triage** (pure logic): Walk the entire tree and collect every state key marked PERSISTENT (union of LLM node `state_scopes` and ancestor `contract.scopes`). If none, set `tree.memory_spec=None` → skip HITL-4 entirely (no persistence needed).
+
+2. **Design** (one LLM call): For found PERSISTENT keys, ask the LLM to:
+   - Select a backend per logical entity (KEY_VALUE, APPEND_LOG, or SEMANTIC)
+   - Wire **bindings**: which LLM node writes the source key (save_source_key) and which node loads it (load_target_key)
+   - The LLM produces structured MemoryEntity objects only; the Compiler turns these into adapter code
+
+### Memory Backends
+
+| Backend | Use Case | Storage |
+|---|---|---|
+| `KEY_VALUE` | Per-user config (settings, preferences, one-per-user data) | `{_key: value, field1: val1, ...}` |
+| `APPEND_LOG` | Time-series events (history, logs, audit trail) | Rows appended per invocation |
+| `SEMANTIC` | High-dimensional recall (embeddings, similarity search) | Uses token-overlap, no external DB |
+
+All backends write to **human-readable Markdown** in `memory_store/<entity>.md` (not SQLite). Atomicity is guaranteed by `os.replace()` + RLock.
+
+### Memory Wiring: Enforcement and Callbacks
+
+The **Compiler** enforces output_key + generated Pydantic schema on every LLM node that writes a PERSISTENT key, and generates deterministic before/after callbacks (not LLM-driven):
+
+1. **before-callback** (before LLM runs): loads prior entity data into a state key so the LLM can read it
+2. **after-callback** (after LLM runs): reads the state key written by the LLM's `output_key`, coerces it to a flat record, and persists it
+
+This design keeps tool bodies 100% PURE — memory persistence is not an LLM responsibility.
+
+### Validation and Repair
+
+The pipeline validates memory wiring **before** the debug loop (`_validate_memory_wiring`):
+- Every binding's node id resolves
+- Save sources have at least one LLM producer (only LLM `output_key` writes reach state)
+- Load/save keys are real fields
+- Failures report immediately with clear messages; no LLM calls wasted
+
+If a memory adapter fails at runtime (e.g. corruption in memory_store/ file), the DebugAgent re-runs `_compile_memory` to regenerate the adapters from the current spec.
+
+### Ancestor PERSISTENT-Key Propagation
+
+A critical insight: **PERSISTENT scopes are declared on composite nodes, but must be honoured by LLM leaf nodes.**
+
+The fix: Before `PromptEngineer` generates instructions for LLM atomics, the pipeline computes `persistent_keys_hint` — the union of all PERSISTENT keys from every ancestor composite. Each node receives this as `persistent_keys_required` in its JSON input:
+
+```python
+# In pipeline.py
+persistent_hint = _build_persistent_keys_hint(tree, llm_atomics)
+await prompt_engineer.engineer(llm_atomics, persistent_keys_hint=persistent_hint)
+```
+
+The PromptEngineer's system prompt is updated to instruct: if a key appears in `persistent_keys_required` AND the node writes it (to match `state_writes` from output_schema), mark it PERSISTENT in `state_scopes` unconditionally. This ensures:
+- The MemoryArchitect finds the LLM producer: `_has_capturable_writer` returns True
+- A save binding (not load-only) gets wired: the Compiler sets `output_key` on the node
+- The after-callback persists the value to storage
+
+### HITL-4
+
+Optional (skippable with `SKIP_MEMORY_REVIEW=1`). The dashboard shows:
+- Each designed entity: backend, fields, bindings, retention window
+- Deletion scope declaration (REQUIRED for GDPR/privacy compliance)
+- "Edit delete_confirmed checkbox" before approval
+
+A rollback re-runs the MemoryArchitectAgent (cheap, single LLM call).
+
+---
+
 ## Data-Flow Contracts
 
 **Contract Linter** fixes a critical gap: catching skill-to-skill wiring errors **before code is generated** rather than at runtime.
@@ -364,9 +478,10 @@ Uses the **Anthropic SDK** for internal agents:
 - [src/agents/prompt_engineer.py](src/agents/prompt_engineer.py) — writes ADK session-state-aware instructions for LLM_PROMPT nodes
 - [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; prefers domain client libraries over raw HTTP; mandates `os.environ` for credentials; uses claude-sonnet-4-6 with syntax validation and retry
 - [src/agents/debug.py](src/agents/debug.py) — analyzes failed import traces, auto-repair failures, and generates patch code for broken implementations
+- [src/agents/memory_architect.py](src/agents/memory_architect.py) — designs persistent-memory contract: triage to collect PERSISTENT keys, select backends (KEY_VALUE / APPEND_LOG / SEMANTIC), wire save/load bindings. Produces MemorySpec (structured only); Compiler transforms into adapters
 - [src/agents/ui_designer.py](src/agents/ui_designer.py) — selects input affordances, output renderers, user-facing agents, and media outputs from a fixed catalog; produces UISpec for Compiler
-- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; emits frontend (web/index.html, ui_manifest.json, serve.py) when UISpec is present; copies referenced skill_lib files into output
-- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with three HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-3 UI design), per-node re-decompose with frozen-contract guard and scoped re-lint, contract freeze on HITL-1 approve, and drift check on HITL-2 retry; saves fully-hydrated atomics to skill_lib after each approved layer
+- [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; emits memory adapters (memory/_store.py, memory/<entity>.py, memory/_bindings.py) and before/after callbacks; emits frontend (web/index.html, ui_manifest.json, serve.py) when UISpec is present; copies referenced skill_lib files into output
+- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with four HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-4 memory, HITL-3 UI design), per-node re-decompose with frozen-contract guard and scoped re-lint, contract freeze on HITL-1 approve, drift check on HITL-2 retry, ancestor PERSISTENT-key hint passed to PromptEngineer, memory validation before debug loop, saves fully-hydrated atomics to skill_lib after each approved layer
 - [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection; real-time job status polling + debug logs
 - [src/skill_lib.py](src/skill_lib.py) — SkillLib class for reading, writing, and searching reusable atomic skills persisted across projects
 - [src/interaction_catalog.py](src/interaction_catalog.py) — fixed catalog of input affordances (TEXT, FILE_UPLOAD, IMAGE_UPLOAD) and output renderers (TEXT, MARKDOWN, TABLE, CODE, IMAGE, FILE_DOWNLOAD) that UIDesigner selects from
@@ -461,24 +576,27 @@ recur-agent/
 │   └── agent_profiles.yaml              # Agent descriptions
 ├── src/
 │   ├── orchestrator/
-│   │   ├── state.py                     # SkillNode (+ contract + contract_note),
-│   │   │                                # SkillTree (+ required_env_vars + skill_lib_ref),
-│   │   │                                # Contract (reads/writes/frozen), LayerSnapshot, rollback()
+│   │   ├── state.py                     # SkillNode (+ contract + contract_note + state_scopes),
+│   │   │                                # SkillTree (+ required_env_vars + skill_lib_ref + memory_spec),
+│   │   │                                # Contract (reads/writes/scopes/frozen), MemorySpec, LayerSnapshot, rollback()
 │   │   └── pipeline.py                  # Main async loop (snapshot -> decompose ->
 │   │                                    #   complexity-review -> contract-lint -> HITL-1 -> schema ->
-│   │                                    #   prompt-engineer -> tool-implement -> HITL-2 ->
-│   │                                    #   compile -> verify-repair); saves atomics to skill_lib
+│   │                                    #   prompt-engineer (with ancestor PERSISTENT hints) -> tool-implement -> HITL-2 ->
+│   │                                    #   memory-architect -> HITL-4 -> ui-designer -> HITL-3 ->
+│   │                                    #   compile (with memory callbacks + output_key enforcement) -> verify-repair); 
+│   │                                    #   saves atomics to skill_lib; validates memory wiring before debug
 │   ├── agents/
 │   │   ├── base_agent.py                # Anthropic SDK wrapper + retry + token tracking
-│   │   ├── decomposer.py                # DecomposerAgent (ADK constraints + skill_lib + contract emission)
+│   │   ├── decomposer.py                # DecomposerAgent (ADK constraints + skill_lib + contract emission + scope tagging)
 │   │   ├── complexity_reviewer.py       # ComplexityReviewAgent
 │   │   ├── contract_linter.py           # ContractLinterAgent (pure-logic wiring check, optional LLM repair)
 │   │   ├── schema_architect.py          # SchemaArchitectAgent (batches of 5)
-│   │   ├── prompt_engineer.py           # PromptEngineerAgent (state_reads / state_writes)
+│   │   ├── prompt_engineer.py           # PromptEngineerAgent (state_reads / state_writes / state_scopes; honors ancestor PERSISTENT hints)
 │   │   ├── tool_implementor.py          # ToolImplementorAgent (sonnet, 1 node/call, syntax retry)
-│   │   ├── debug.py                     # DebugAgent (analyze import failures, auto-repair)
+│   │   ├── memory_architect.py          # MemoryArchitectAgent (triage PERSISTENT keys, select backends, wire bindings)
+│   │   ├── debug.py                     # DebugAgent (analyze import failures, auto-repair, memory adapter regeneration)
 │   │   ├── ui_designer.py               # UIDesignerAgent (catalog selection, UISpec generation)
-│   │   └── compiler.py                  # CompilerAgent (Jinja2 walk, dep/env/UI scan, skill_lib copy)
+│   │   └── compiler.py                  # CompilerAgent (Jinja2 walk, dep/env/memory/UI scan, skill_lib copy, enforces output_key + schema on LLM producers)
 │   ├── ui/
 │   │   ├── server.py                    # FastAPI HITL dashboard + sandbox + job polling + debug logs
 │   │   └── templates/
@@ -487,20 +605,38 @@ recur-agent/
 │   │       └── chat.html                # Embedded chat for testing generated agents
 │   ├── skill_lib.py                     # SkillLib: read/write/search reusable skill definitions
 │   ├── interaction_catalog.py           # Fixed catalog of input affordances + output renderers
+│   ├── memory_catalog.py                # Fixed catalog of memory backends: KEY_VALUE, APPEND_LOG, SEMANTIC
 │   └── compiler_templates/
-│       ├── adk_tool_stub.py.j2          # def {name}() + FunctionTool + LlmAgent wrapper
-│       ├── adk_llm_agent_stub.py.j2     # LlmAgent with instruction + state wiring
-│       ├── adk_sequential_agent.py.j2   # SequentialAgent orchestrator
-│       ├── adk_parallel_agent.py.j2     # ParallelAgent orchestrator
-│       ├── adk_loop_agent.py.j2         # LoopAgent orchestrator (max_iterations=10)
-│       ├── adk_coordinator_agent.py.j2  # LlmAgent coordinator with routing instruction
+│       ├── adk_tool_stub.py.j2          # def {name}() + FunctionTool + LlmAgent wrapper (+ memory callbacks)
+│       ├── adk_llm_agent_stub.py.j2     # LlmAgent with instruction + state wiring + output_key + output_schema (+ memory callbacks)
+│       ├── adk_sequential_agent.py.j2   # SequentialAgent orchestrator (+ memory callbacks)
+│       ├── adk_parallel_agent.py.j2     # ParallelAgent orchestrator (+ memory callbacks)
+│       ├── adk_loop_agent.py.j2         # LoopAgent orchestrator max_iterations=10 (+ memory callbacks)
+│       ├── adk_coordinator_agent.py.j2  # LlmAgent coordinator with routing instruction (+ memory callbacks)
 │       ├── adk_root_orchestrator.py.j2  # run.py (interactive CLI)
 │       ├── frontend_index.html.j2       # Landing page template for UI feature
-│       ├── serve.py.j2                  # Serve.py template for static web serving
+│       ├── serve.py.j2                  # Serve.py template for static web serving (initializes memory via init_memory())
 │       ├── ui_manifest.json.j2          # UI manifest template
+│       ├── memory_store.py.j2            # Shared MarkdownStore class (atomic writes via os.replace + RLock)
+│       ├── memory_keyvalue.py.j2         # KEY_VALUE adapter (set by key / get by key)
+│       ├── memory_appendlog.py.j2        # APPEND_LOG adapter (append row / query all)
+│       ├── memory_semantic.py.j2         # SEMANTIC adapter (add by embedding / query by similarity)
+│       ├── memory_init.py.j2             # init_memory() function (called before agents load)
+│       ├── memory_bindings.py.j2         # BEFORE_CALLBACKS / AFTER_CALLBACKS (wired to agents)
+│       ├── dotignore.j2                  # .gitignore + .dockerignore (blocks memory_store/)
 │       └── adk_pyproject.toml.j2        # Target project manifest (auto-deps injected)
+├── memory_catalog.py                    # Built-in backend catalog for MemoryArchitect
+├── memory.md                            # (generated by memory_architect) — memory blueprint snapshot
 └── output/
     └── {project_name}/                  # Generated ADK project
+        ├── memory/                      # (if memory_spec is not None)
+        │   ├── _store.py                # MarkdownStore class (shared)
+        │   ├── _bindings.py             # BEFORE_CALLBACKS / AFTER_CALLBACKS per node
+        │   ├── _init.py                 # init_memory() + clear_<entity>() registry
+        │   ├── {entity_name}.py         # MemoryAdapter subclass (KEY_VALUE / APPEND_LOG / SEMANTIC)
+        │   └── __init__.py
+        └── memory_store/                # (in .gitignore / .dockerignore)
+            └── {entity_name}.md         # Markdown table (one per entity, human-readable)
 ```
 
 ---
@@ -618,10 +754,11 @@ credential form.
 | `DecomposerAgent` | `claude-haiku-4-5` (default) | High-throughput classification; skill_lib injection; many calls per run |
 | `ComplexityReviewAgent` | `claude-haiku-4-5` (default) | Light scan; speed over depth |
 | `SchemaArchitectAgent` | `claude-haiku-4-5` (default) | Structured JSON output; fast |
-| `PromptEngineerAgent` | `claude-haiku-4-5` (default) | Instruction writing; moderate complexity |
+| `PromptEngineerAgent` | `claude-haiku-4-5` (default) | Instruction writing; honours ancestor PERSISTENT-key hints |
 | `ToolImplementorAgent` | `claude-sonnet-4-6` | Code generation requires highest quality; 1 node/call |
-| `DebugAgent` | `claude-haiku-4-5` (default) | Analyze import failures; generate patches; lightweight analysis |
-| `UIDesignerAgent` | `claude-haiku-4-5` (default) | Select UI affordances from catalog; structured output (UISpec); runs once after tree is complete |
+| `MemoryArchitectAgent` | `claude-haiku-4-5` (default) | Memory backend selection; runs once after tree is hydrated+implemented |
+| `DebugAgent` | `claude-haiku-4-5` (default) | Analyze import failures; generate patches; regenerate memory adapters on adapter errors |
+| `UIDesignerAgent` | `claude-haiku-4-5` (default) | Select UI affordances from catalog; structured output (UISpec); runs once after memory design |
 
 ---
 

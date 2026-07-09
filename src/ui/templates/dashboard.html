@@ -1638,6 +1638,73 @@
     </div>
     {% endif %}
 
+    {% if status.startswith("awaiting_memory_review") and tree and tree.memory_spec %}
+    <!-- ── HITL-4: persistent-memory review ──────────────────────────────── -->
+    <div class="state-card" id="memory-review-card" style="border-color:var(--claude-orange);max-width:760px;text-align:left">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <div class="state-icon" style="margin:0">🗄️</div>
+        <div class="state-title" style="margin:0">Review persistent memory</div>
+      </div>
+      <div class="state-desc" style="margin-bottom:18px">
+        This product persists state across separate runs. The Memory Architect designed the
+        storage below. Override any field, confirm each deletion scope, then approve — or
+        regenerate to redesign from scratch.
+      </div>
+
+      <div id="memory-entities">
+        {% for e in tree.memory_spec.entities %}
+        <div class="node-card" data-entity-name="{{ e.name }}" style="margin-bottom:14px">
+          <div class="card-top">
+            <span class="type-badge composite" style="text-transform:none">{{ e.backend.value }}</span>
+            <span class="node-name" style="border:none">{{ e.name }}</span>
+          </div>
+
+          <div class="impl-subsection-label">Fields</div>
+          <div class="state-pills">
+            {% for f in e.fields %}
+            <span class="state-pill read" title="{{ f.type }}">{{ f.name }}: {{ f.type }}</span>
+            {% endfor %}
+            {% if not e.fields %}<span class="contract-empty">no fields</span>{% endif %}
+          </div>
+
+          {% if e.bindings %}
+          <div class="impl-subsection-label" style="margin-top:10px">Persistence wiring</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            {% for b in e.bindings %}
+              {% set owner = tree.root.find_node_by_id(b.node_id) %}
+              <div style="font-size:12px;color:var(--text-secondary)">
+                <span class="state-pill write">{{ owner.name if owner else b.node_id[:8] }}</span>
+                {% if b.load_target_key %}<span title="recalled into this state key before the agent runs">↱ loads <code>{{ b.load_target_key }}</code></span>{% endif %}
+                {% if b.load_target_key and b.save_source_key %} · {% endif %}
+                {% if b.save_source_key %}<span title="persisted from this state key after the agent runs">↳ saves <code>{{ b.save_source_key }}</code></span>{% endif %}
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          <label class="ui-field-label">Retention (blank = indefinite)</label>
+          <input class="ui-input mem-retention" value="{{ e.retention or '' }}" />
+
+          <label class="ui-field-label">Deletion scope (what counts as "a user's data")</label>
+          <input class="ui-input mem-deletion-scope" value="{{ e.deletion_scope }}" />
+
+          <label class="ui-chip" style="margin-top:12px">
+            <input type="checkbox" class="mem-deletion-confirm" {% if e.deletion_confirmed %}checked{% endif %} />
+            I confirm this entity's deletion scope is correct
+          </label>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div style="display:flex;gap:10px;margin-top:8px;flex-wrap:wrap">
+        <button onclick="saveMemory(this)" class="ui-btn-secondary">Save edits</button>
+        <button onclick="approveMemory(this)" class="ui-btn-primary">Approve memory design</button>
+        <button onclick="rollbackMemory(this)" class="ui-btn-secondary">↻ Regenerate</button>
+      </div>
+      <div id="memory-review-status" style="margin-top:10px;font-size:12px;color:var(--text-secondary)"></div>
+    </div>
+    {% endif %}
+
     {% if status.startswith("awaiting_ui_review") and tree and tree.ui_spec %}
     <!-- ── HITL-3: UI / interaction review ───────────────────────────────── -->
     <div class="state-card" id="ui-review-card" style="border-color:var(--claude-orange);max-width:640px;text-align:left">
@@ -2011,7 +2078,7 @@ function renderStatusPill(status) {
 
   if (status === 'done') {
     pill.classList.add('done');
-  } else if (status.startsWith('awaiting_review') || status.startsWith('awaiting_impl_review') || status.startsWith('awaiting_ui_review')) {
+  } else if (status.startsWith('awaiting_review') || status.startsWith('awaiting_impl_review') || status.startsWith('awaiting_ui_review') || status.startsWith('awaiting_memory_review')) {
     pill.classList.add('review');
   } else if (status === 'idle') {
     pill.classList.add('idle');
@@ -2288,7 +2355,7 @@ function toast(msg, type = 'info') {
 }
 
 // ── Auto-refresh when pipeline is processing ─────────────────────────────────
-{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and not status.startswith("awaiting_ui_review") and status != "done" and status != "debug_awaiting_env" %}
+{% if not status.startswith("awaiting_review") and not status.startswith("awaiting_impl_review") and not status.startswith("awaiting_ui_review") and not status.startswith("awaiting_memory_review") and status != "done" and status != "debug_awaiting_env" %}
 autoRefreshTimer = setTimeout(() => location.reload(), 3500);
 {% endif %}
 
@@ -3187,6 +3254,75 @@ async function rollbackUI(btn) {
   try {
     const r = await fetch('/rollback_ui', { method: 'POST' });
     if (!r.ok) { statusEl.textContent = 'Re-design failed'; btn.disabled = false; return; }
+    setTimeout(() => location.reload(), 1200);
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+// ── HITL-4: persistent-memory review ──────────────────────────────────────────
+function _memoryPayload() {
+  const entities = [];
+  document.querySelectorAll('#memory-entities [data-entity-name]').forEach(card => {
+    entities.push({
+      name: card.dataset.entityName,
+      retention: card.querySelector('.mem-retention').value.trim(),
+      deletion_scope: card.querySelector('.mem-deletion-scope').value.trim(),
+      deletion_confirmed: card.querySelector('.mem-deletion-confirm').checked,
+    });
+  });
+  return { entities };
+}
+
+async function saveMemory(btn) {
+  const statusEl = document.getElementById('memory-review-status');
+  statusEl.textContent = 'Saving…';
+  try {
+    const r = await fetch('/edit_memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_memoryPayload()),
+    });
+    statusEl.textContent = r.ok ? 'Saved ✓' : 'Save failed';
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+}
+
+async function approveMemory(btn) {
+  btn.disabled = true;
+  const statusEl = document.getElementById('memory-review-status');
+  statusEl.textContent = 'Saving edits…';
+  try {
+    // Persist edits (incl. deletion-scope confirmations) first, then approve.
+    await fetch('/edit_memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_memoryPayload()),
+    });
+    const r = await fetch('/approve_memory', { method: 'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({ detail: 'Approve failed' }));
+      statusEl.textContent = d.detail || 'Approve failed';
+      btn.disabled = false;
+      return;
+    }
+    statusEl.textContent = 'Approved — continuing…';
+    setTimeout(() => location.reload(), 1200);
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function rollbackMemory(btn) {
+  btn.disabled = true;
+  const statusEl = document.getElementById('memory-review-status');
+  statusEl.textContent = 'Regenerating…';
+  try {
+    const r = await fetch('/rollback_memory', { method: 'POST' });
+    if (!r.ok) { statusEl.textContent = 'Regenerate failed'; btn.disabled = false; return; }
     setTimeout(() => location.reload(), 1200);
   } catch (err) {
     statusEl.textContent = 'Error: ' + err.message;

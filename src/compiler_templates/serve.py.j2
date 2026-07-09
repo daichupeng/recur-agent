@@ -18,6 +18,13 @@ if str(_HERE) not in sys.path:
 
 from dotenv import load_dotenv
 load_dotenv()
+{%- if has_memory %}
+
+# Initialise persistent memory at startup (before the ADK app imports agents). State is
+# stored as human-readable Markdown tables under the fixed dir <project>/memory_store/.
+from memory import init_memory, clear_memory
+init_memory()
+{%- endif %}
 
 from fastapi.staticfiles import StaticFiles
 from google.adk.cli.fast_api import get_fast_api_app
@@ -35,6 +42,19 @@ def build_app(host: str = "0.0.0.0", port: int = 8080):
         host=host,
         port=port,
     )
+{%- if has_memory %}
+
+    # Operator-facing deletion path: wipe one entity, or all if none named.
+    @app.post("/memory/{entity}/clear")
+    def _clear_memory_endpoint(entity: str):
+        target = None if entity in ("__all__", "all") else entity
+        try:
+            removed = clear_memory(target)
+        except KeyError as exc:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"ok": True, "entity": entity, "cleared_rows": removed}
+{%- endif %}
 
     # Mount our generated frontend LAST so ADK's explicit API routes (/run_sse,
     # /apps/...) take precedence over this catch-all static mount.

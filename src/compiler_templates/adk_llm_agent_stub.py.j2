@@ -1,5 +1,19 @@
 """{{ node.name }} — atomic LLM skill."""
 from google.adk.agents import LlmAgent
+{%- if memory_node_id %}
+from memory._bindings import BEFORE_CALLBACKS, AFTER_CALLBACKS
+{%- endif %}
+{%- if output_fields %}
+from typing import Any  # noqa: F401  (used by the output schema model)
+from pydantic import BaseModel
+
+
+class _{{ node.name }}_Output(BaseModel):
+    """Enforced output schema — persisted to memory under state key '{{ output_key }}'."""
+{%- for f in output_fields %}
+    {{ f.name }}: {{ f.type | mem_pytype }} | None = None
+{%- endfor %}
+{%- endif %}
 
 {{ node.name }}_agent = LlmAgent(
     name="{{ node.name }}",
@@ -13,5 +27,17 @@ Inputs available in session state:
 Write your output to session state matching this schema:
 {{ node.output_schema | tojson(indent=2) }}
 {%- endif %}
+{%- if output_fields %}
+
+Return ONLY a JSON object with exactly these fields: {{ output_fields | map(attribute='name') | join(", ") }}.
+{%- endif %}
 """,
+{%- if output_fields %}
+    output_schema=_{{ node.name }}_Output,
+    output_key="{{ output_key }}",
+{%- endif %}
+{%- if memory_node_id %}
+    before_agent_callback=BEFORE_CALLBACKS.get("{{ memory_node_id }}"),
+    after_agent_callback=AFTER_CALLBACKS.get("{{ memory_node_id }}"),
+{%- endif %}
 )

@@ -13,7 +13,22 @@
       "Bash(python test_contract_linter.py)",
       "Bash(python -c ' *)",
       "Bash(python -m py_compile src/orchestrator/state.py src/orchestrator/pipeline.py src/agents/decomposer.py src/agents/contract_linter.py src/ui/server.py test_contract_linter.py)",
-      "Bash(python -c \"from src.agents.compiler import _collect_third_party_deps; print\\('ok'\\)\")"
+      "Bash(python -c \"from src.agents.compiler import _collect_third_party_deps; print\\('ok'\\)\")",
+      "Bash(python -c \"import src.orchestrator.pipeline as p; print\\('pipeline imports OK'\\); print\\('has _design_memory:', hasattr\\(p, '_design_memory'\\)\\); print\\('has _hitl_memory:', hasattr\\(p, '_hitl_memory'\\)\\)\")",
+      "Bash(python -c \"import src.ui.server as s; print\\('server imports OK'\\); import inspect; print\\('routes:', [r.path for r in s.app.routes if 'memory' in r.path.lower\\(\\)]\\)\")",
+      "Bash(python -m pytest test_contract_linter.py test_hitl1_features.py -q)",
+      "Bash(rm -rf /tmp/_memproj.txt /tmp/_memproj2.txt /tmp/tmp*/stripe_alerter 2>/dev/null; echo \"cleaned\")",
+      "Bash(python3 -c ' *)",
+      "Bash(VIRTUAL_ENV='' uv run --no-sync python -c ' *)",
+      "Bash(grep -Ev 'Warning|warn|Deprecat|EXPERIMENTAL|VIRTUAL_ENV|Entry|frozen|^$|Using CPython|Resolved|Audited|Installed|Building|Built|Prepared')",
+      "Bash(python -c \"import src.orchestrator.pipeline, src.agents.compiler, src.agents.debug, src.agents.tool_implementor, src.agents.memory_architect, src.ui.server; print\\('imports OK'\\)\")",
+      "Bash(grep -Ev 'Warning|warn|Deprecat|EXPERIMENTAL|VIRTUAL_ENV|Entry|frozen|^$|Using CPython|Resolved|Audited|Installed|Building|Built|Prepared|Both GOOGLE')",
+      "Bash(python -c \"import src.orchestrator.pipeline, src.agents.compiler, src.agents.memory_architect, src.agents.debug, src.agents.tool_implementor, src.ui.server; print\\('all modules import OK'\\)\")",
+      "Bash(python3 -m pytest tests/ -x -q)",
+      "Bash(python3 -m pytest test_hitl1_features.py test_contract_linter.py -x -q)"
+    ],
+    "additionalDirectories": [
+      "/tmp/tmp*"
     ]
   }
 }

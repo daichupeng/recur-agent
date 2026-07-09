@@ -70,10 +70,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 import pytest
 from dotenv import load_dotenv
 from google.adk.runners import InMemoryRunner
+from google.adk.agents.run_config import RunConfig
 from google.genai.types import Content, Part
 
 load_dotenv()
 ```
+
+CALL-LIMIT SAFETY — every `run_async` MUST pass `run_config=RunConfig(max_llm_calls=20)` so a
+runaway tool/agent loop fails fast instead of burning the default 500-call ceiling (minutes of
+wall time). Always include this argument.
 
 CRITICAL API RULES — the google-genai library uses CONSTRUCTORS, not class methods:
 - CORRECT:   Part(text="some text")
@@ -95,6 +100,7 @@ async def test_<name>():
         user_id=USER_ID,
         session_id=session.id,
         new_message=message,
+        run_config=RunConfig(max_llm_calls=20),
     ):
         if event.is_final_response() and event.content and event.content.parts:
             for part in event.content.parts:
@@ -161,6 +167,7 @@ class DebugAgent(BaseAgent):
         self._patch_agent = _PatchAgent()
         self._test_patch_agent = _TestPatchAgent()
         self._compiler = CompilerAgent()
+        self._memory_regenerated = False  # regenerate the memory package at most once per run
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -418,6 +425,24 @@ class DebugAgent(BaseAgent):
         self, error_output: str, project_dir: Path, tree: SkillTree, test_file: Path | None = None
     ) -> bool:
         """Identify the failing atomic node or test file and patch it. Returns True if patched."""
+
+        # ── Priority -1: memory adapter failure ──────────────────────────────
+        # Memory adapters are template-generated (not SkillNodes); a failure in
+        # memory/<x>.py means a malformed schema/template, not bad LLM code. Regenerate
+        # the whole memory package from the current memory_spec rather than LLM-patching.
+        if (
+            not self._memory_regenerated
+            and tree.memory_spec is not None
+            and re.search(r"memory[/\\]([^\"'\s:]+)\.py", error_output)
+        ):
+            logger.info("[debug] Traceback points at a memory adapter — regenerating memory package.")
+            self._memory_regenerated = True  # once per run; avoids a regen loop on a truly bad schema
+            try:
+                self._compiler._compile_memory(tree, project_dir)  # type: ignore[attr-defined]
+                return True
+            except Exception as exc:
+                logger.error("[debug] Memory regeneration failed: %s", exc)
+                # Fall through to normal repair paths.
 
         # ── Priority 0: deterministic sanitize of the test file ───────────────
         # Catches known API misuses (Part.from_text etc.) without an LLM call.
@@ -704,6 +729,7 @@ def _minimal_test_template(
         load_dotenv()
 
         from google.adk.runners import InMemoryRunner
+        from google.adk.agents.run_config import RunConfig
         from google.genai.types import Content, Part
 
         from {root_module} import {root_symbol} as root_agent
@@ -725,6 +751,7 @@ def _minimal_test_template(
                 user_id=USER_ID,
                 session_id=session.id,
                 new_message=message,
+                run_config=RunConfig(max_llm_calls=20),
             ):
                 if event.is_final_response() and event.content and event.content.parts:
                     for part in event.content.parts:

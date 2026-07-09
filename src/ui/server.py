@@ -451,6 +451,95 @@ async def edit_ui(payload: EditUIPayload) -> dict:
     return {"ok": True}
 
 
+# ── HITL-4: memory / persistence review ──────────────────────────────────────
+
+
+@app.post("/approve_memory")
+async def approve_memory() -> dict:
+    """Approve the persistent-memory design (HITL-4) and proceed to UI design.
+
+    Refuses unless every entity's deletion scope has been explicitly confirmed — the
+    forcing function that makes a human look at the deletion path before approving.
+    """
+    ev = _require_events()
+    if not ev.status.startswith("awaiting_memory_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"No memory review in progress (status={ev.status})",
+        )
+    tree = ev.current_tree
+    if tree is not None and tree.memory_spec is not None:
+        unconfirmed = [e.name for e in tree.memory_spec.entities if not e.deletion_confirmed]
+        if unconfirmed:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Confirm the deletion scope for every entity before approving: "
+                    + ", ".join(unconfirmed)
+                ),
+            )
+    ev.rollback_memory.clear()
+    ev.approve_memory.set()
+    return {"ok": True, "action": "approved_memory"}
+
+
+@app.post("/rollback_memory")
+async def rollback_memory() -> dict:
+    """Reject the generated memory design (HITL-4); the Memory Architect re-runs."""
+    ev = _require_events()
+    if not ev.status.startswith("awaiting_memory_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"No memory review in progress (status={ev.status})",
+        )
+    ev.approve_memory.clear()
+    ev.rollback_memory.set()
+    return {"ok": True, "action": "rollback_memory"}
+
+
+class MemoryEntityEdit(BaseModel):
+    name: str  # match key — identifies which entity to edit
+    backend: Optional[str] = None
+    retention: Optional[str] = None
+    deletion_scope: Optional[str] = None
+    deletion_confirmed: Optional[bool] = None
+
+
+class EditMemoryPayload(BaseModel):
+    entities: list[MemoryEntityEdit]
+
+
+@app.post("/edit_memory")
+async def edit_memory(payload: EditMemoryPayload) -> dict:
+    """Manual override of the generated MemorySpec (no LLM re-run).
+
+    Matches each edit to an entity by name and applies backend/retention/deletion_scope/
+    deletion_confirmed. Backend is validated against MemoryBackend.
+    """
+    from src.orchestrator.state import MemoryBackend
+
+    ev = _require_events()
+    if ev.current_tree is None or ev.current_tree.memory_spec is None:
+        raise HTTPException(status_code=404, detail="No memory spec to edit")
+    spec = ev.current_tree.memory_spec
+    by_name = {e.name: e for e in spec.entities}
+
+    for edit in payload.entities:
+        entity = by_name.get(edit.name)
+        if entity is None:
+            continue
+        if edit.backend is not None and edit.backend in MemoryBackend._value2member_map_:
+            entity.backend = MemoryBackend(edit.backend)
+        if edit.retention is not None:
+            entity.retention = edit.retention or None
+        if edit.deletion_scope is not None:
+            entity.deletion_scope = edit.deletion_scope or "entire entity"
+        if edit.deletion_confirmed is not None:
+            entity.deletion_confirmed = edit.deletion_confirmed
+
+    return {"ok": True}
+
+
 # ── Debug env-var endpoints ─────────────────────────────────────────────────
 
 

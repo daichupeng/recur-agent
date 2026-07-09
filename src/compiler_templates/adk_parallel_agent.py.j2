@@ -3,6 +3,9 @@ from google.adk.agents import ParallelAgent
 {%- for imp in child_imports %}
 from {{ imp.module }} import {{ imp.symbol }}
 {%- endfor %}
+{%- if memory_node_id %}
+from memory._bindings import BEFORE_CALLBACKS, AFTER_CALLBACKS
+{%- endif %}
 
 {{ node.name }}_agent = ParallelAgent(
     name="{{ node.name }}",
@@ -11,4 +14,8 @@ from {{ imp.module }} import {{ imp.symbol }}
         {{ imp.symbol }},
 {%- endfor %}
     ],
+{%- if memory_node_id %}
+    before_agent_callback=BEFORE_CALLBACKS.get("{{ memory_node_id }}"),
+    after_agent_callback=AFTER_CALLBACKS.get("{{ memory_node_id }}"),
+{%- endif %}
 )

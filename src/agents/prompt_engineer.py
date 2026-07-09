@@ -26,6 +26,15 @@ Each node will be compiled into a Google ADK LlmAgent. Your job is to:
 
 2. Identify `state_reads` — the list of session state key names the agent reads.
 3. Identify `state_writes` — the list of session state key names the agent writes.
+4. Identify `state_scopes` — a mapping of state key → "PERSISTENT" for any key that must
+   survive across separate invocations. Default every state key to EPHEMERAL. Only mark a
+   key PERSISTENT if EITHER:
+   - the node description explicitly implies durability (words like 'remember', 'history',
+     'next time', 'over time', 'previously seen'), OR
+   - the key appears in the node's `persistent_keys_required` list (keys that an ancestor
+     composite explicitly declared PERSISTENT — you MUST honour these).
+   Do not mark PERSISTENT speculatively for keys not in either category. List ONLY the
+   PERSISTENT keys (omit the rest — they default to EPHEMERAL).
 
 For state key naming: use snake_case, derive from the node's name and schema properties.
 The output_schema properties should map to state_writes keys.
@@ -37,7 +46,8 @@ You MUST respond with a JSON array parallel to the input array — one entry per
   {
     "instruction": "<full system prompt string>",
     "state_reads": ["key1", "key2"],
-    "state_writes": ["key3"]
+    "state_writes": ["key3"],
+    "state_scopes": {"key3": "PERSISTENT"}
   },
   ...
 ]
@@ -51,6 +61,10 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
             "instruction": {"type": "string"},
             "state_reads": {"type": "array", "items": {"type": "string"}},
             "state_writes": {"type": "array", "items": {"type": "string"}},
+            "state_scopes": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "enum": ["EPHEMERAL", "PERSISTENT"]},
+            },
         },
         "required": ["instruction", "state_reads", "state_writes"],
         "additionalProperties": False,
@@ -62,26 +76,38 @@ class PromptEngineerAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(system_prompt=_SYSTEM_PROMPT)
 
-    async def engineer(self, nodes: list[SkillNode], feedback: str | None = None) -> list[SkillNode]:
+    async def engineer(
+        self,
+        nodes: list[SkillNode],
+        feedback: str | None = None,
+        persistent_keys_hint: dict[str, set[str]] | None = None,
+    ) -> list[SkillNode]:
         """Generate instruction and session-state wiring for LLM atomic nodes (in-place).
 
         Args:
             nodes: Nodes to engineer prompts for.
             feedback: Optional human feedback for per-skill retry (HITL-2). When provided,
                       it is appended to the user prompt so the LLM can address the concern.
+            persistent_keys_hint: Maps node_id → set of state-key names that ancestor
+                composites declared PERSISTENT. The PromptEngineer must honour these by
+                including them in state_scopes when the node writes them.
         """
         if not nodes:
             return nodes
 
-        node_dicts = [
-            {
+        node_dicts = []
+        for n in nodes:
+            d: dict[str, Any] = {
                 "name": n.name,
                 "description": n.description,
                 "input_schema": n.input_schema,
                 "output_schema": n.output_schema,
             }
-            for n in nodes
-        ]
+            required = sorted((persistent_keys_hint or {}).get(n.id, set()))
+            if required:
+                d["persistent_keys_required"] = required
+            node_dicts.append(d)
+
         user_content = (
             "Generate instructions and session-state wiring for these LLM atomic nodes:\n"
             + json.dumps(node_dicts, indent=2)
@@ -106,6 +132,12 @@ class PromptEngineerAgent(BaseAgent):
             node.instruction = result["instruction"]
             node.state_reads = result.get("state_reads", [])
             node.state_writes = result.get("state_writes", [])
+            # Keep only explicitly PERSISTENT scopes; EPHEMERAL is the implied default.
+            node.state_scopes = {
+                str(k): str(v)
+                for k, v in (result.get("state_scopes") or {}).items()
+                if str(v) == "PERSISTENT"
+            }
             logger.debug("Instruction engineered for: %s", node.name)
 
         self.log_usage()

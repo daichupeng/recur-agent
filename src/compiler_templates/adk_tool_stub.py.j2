@@ -10,6 +10,9 @@ from google.adk.tools import FunctionTool
 from google.adk.tools import ToolContext
 from google.genai import types  # noqa: F401  (used by save_artifact in the body)
 {%- endif %}
+{%- if memory_node_id %}
+from memory._bindings import BEFORE_CALLBACKS, AFTER_CALLBACKS
+{%- endif %}
 
 
 {% if is_media %}async {% endif %}def {{ node.name }}(
@@ -55,4 +58,8 @@ _{{ node.name }}_tool = FunctionTool({{ node.name }})
         "Read each value from the session state key matching its name."
     ),
     tools=[_{{ node.name }}_tool],
+{%- if memory_node_id %}
+    before_agent_callback=BEFORE_CALLBACKS.get("{{ memory_node_id }}"),
+    after_agent_callback=AFTER_CALLBACKS.get("{{ memory_node_id }}"),
+{%- endif %}
 )

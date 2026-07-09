@@ -66,6 +66,12 @@ can display or download it. For a node flagged `emits_media` with `media_types` 
   `io.BytesIO`. For a text/CSV/PDF file, build the bytes directly.
 - Still return a dict matching the output_schema (plus `artifact_filename`).
 
+## Persistence
+Do NOT read or write any files, databases, or long-term storage. If a value must persist
+across runs, simply read it from / write it to the function's inputs and returned dict — the
+platform wires persistence deterministically outside your function. Your body must be a pure
+transformation of its inputs to its output dict.
+
 You MUST respond with a JSON array parallel to the input array — one entry per input node:
 [
   {
