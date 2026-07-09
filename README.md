@@ -62,6 +62,21 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   +------------------------------------------+
         |
         v
+  +------------------------------------------+
+  | Contract Linter  (pure Python logic)     |
+  |  deterministic data-flow wiring check:   |
+  |  for each COMPOSITE node, verify that    |
+  |  children's declared contracts chain     |
+  |  correctly per composition_type:         |
+  |    SEQUENTIAL: running state available   |
+  |    PARALLEL: disjoint writes, coverage   |
+  |    LOOP: shape-stable, termination key   |
+  |    LLM_COORDINATOR: each path complete   |
+  |  attach contract_note to flagged nodes   |
+  |  (violations shown as warnings in UI)    |
+  +------------------------------------------+
+        |
+        v
   ##################################################
   #  HITL-1: Structure Review  (dashboard)         #
   ##################################################
@@ -71,16 +86,22 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
         |
         +-- RE-DECOMPOSE NODE? -------+
         |   (human edits description  |
-        |    + optional hint)         v
+        |    + optional hint;
+        |     if contract frozen:
+        |     confirm force_renegotiate) v
         |                     reset that node only:
         |                       children.clear()
         |                       node_type = UNKNOWN
         |                     re-call Decomposer on
         |                     that node with hint
+        |                     | (if forced unfreeze: 
+        |                     |  re-lint parent group)
         |                             |
         |                     back to HITL-1 <-- INNER LOOP (siblings untouched)
         |
         +-- APPROVE?
+        |   -> freeze all node contracts in
+        |      approved layer group
         |
         v
   +------------------------------------------+
@@ -115,6 +136,10 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   ##################################################
   #  HITL-2: Implementation Review  (dashboard)    #
   ##################################################
+        |
+        +-- (optional per-skill retry: re-implements
+        |    one node, checks contract drift against
+        |    frozen declared contract)
         |
         +-- ROLLBACK? --> restore snapshot -> schemas + impls discarded ----------------------->+
         |                 (same layer retried from Decomposer)                                   (continue)
@@ -250,6 +275,52 @@ Nodes with media output are re-implemented as `async` functions with a `ToolCont
 
 ---
 
+## Data-Flow Contracts
+
+**Contract Linter** fixes a critical gap: catching skill-to-skill wiring errors **before code is generated** rather than at runtime.
+
+### Why Contracts Matter
+
+When decomposing a skill into children, you must ensure they form a coherent pipeline:
+- A child cannot read a state key no sibling produces.
+- Parallel children cannot write the same state key (collision).
+- A LOOP body (child) must be shape-stable: same keys in and out.
+- A parent cannot promise outputs it never receives from children.
+
+Today these errors only surface when the compiled project fails to run. **Contracts make them visible at HITL-1.**
+
+### How They Work
+
+Each node has a `contract`:
+- **reads**: state keys the node consumes (e.g. `{stripe_event: "dict — raw webhook payload"}`)
+- **writes**: state keys the node produces (e.g. `{alert_sent: "bool — whether alert succeeded"}`)
+
+The `DecomposerAgent` emits contracts at classification time — for the composite node itself and each proposed child. The **Contract Linter** then performs a deterministic, pure-logic check:
+
+| Composition | Check |
+|---|---|
+| **SEQUENTIAL** | Child reads must be subset of parent reads + what earlier siblings wrote. Final union of writes must satisfy parent writes. |
+| **PARALLEL** | Each child's reads ⊆ parent reads (no inter-sibling data). Children's writes must be disjoint. Union of writes must cover parent writes. |
+| **LOOP** | Single child's reads and writes must be identical key set (shape-stable). Must include a termination-condition key (e.g. `is_done`). |
+| **LLM_COORDINATOR** | Each child is an independent path: child reads ⊆ parent reads, child writes ⊇ parent writes. |
+
+**Violations** are attached to composite nodes as `contract_note` and shown as red banners in the HITL-1 UI, alongside complexity warnings.
+
+### Contract Freezing
+
+Once a layer is approved at HITL-1, all contracts in that group (the layer's composites and their children) are **frozen**. This prevents a later redecompose from silently breaking the wiring siblings depend on:
+- If you try to redecompose a **frozen node**, the UI shows a confirmation dialog warning that you're changing an approved contract your siblings rely on.
+- Confirming unlocks the node and its sibling group; the linter re-runs after redecompose.
+
+### Drift Detection (HITL-2)
+
+When a skill is re-implemented at HITL-2, its new signature (from the regenerated schema) is checked against the frozen declared contract:
+- If the new schema **drops a promised output**, the frontend shows a **drift warning**.
+- If the new schema **adds an unexpected input**, the frontend shows a **drift warning**.
+- Drift is a warning, not a blocker — you can approve despite it, or retry the implementation.
+
+---
+
 ## Skill Library (skill_lib)
 
 **recur-agent** maintains a cross-project skill library that captures fully-hydrated atomic skills:
@@ -286,15 +357,16 @@ Everything else is **composite** and will be further decomposed.
 
 ### Platform Engine (this repo)
 Uses the **Anthropic SDK** for internal agents:
-- [src/agents/decomposer.py](src/agents/decomposer.py) — classifies and expands nodes; enforces ADK composition rules in system prompt; injects skill_lib context for pre-filling from reusable library
+- [src/agents/decomposer.py](src/agents/decomposer.py) — classifies and expands nodes; enforces ADK composition rules in system prompt; injects skill_lib context for pre-filling from reusable library; emits declared data-flow contracts (reads/writes) for every node at classification time
 - [src/agents/complexity_reviewer.py](src/agents/complexity_reviewer.py) — flags over-split or structurally odd decompositions
+- [src/agents/contract_linter.py](src/agents/contract_linter.py) — pure-logic deterministic wiring check: for each composite, verifies children's contracts chain correctly per composition_type; no auto-fix; surfaces violations to human at HITL-1
 - [src/agents/schema_architect.py](src/agents/schema_architect.py) — hydrates I/O JSON Schema for every unhydrated atomic in the tree
 - [src/agents/prompt_engineer.py](src/agents/prompt_engineer.py) — writes ADK session-state-aware instructions for LLM_PROMPT nodes
 - [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; prefers domain client libraries over raw HTTP; mandates `os.environ` for credentials; uses claude-sonnet-4-6 with syntax validation and retry
 - [src/agents/debug.py](src/agents/debug.py) — analyzes failed import traces, auto-repair failures, and generates patch code for broken implementations
 - [src/agents/ui_designer.py](src/agents/ui_designer.py) — selects input affordances, output renderers, user-facing agents, and media outputs from a fixed catalog; produces UISpec for Compiler
 - [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; emits frontend (web/index.html, ui_manifest.json, serve.py) when UISpec is present; copies referenced skill_lib files into output
-- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with three HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-3 UI design) and per-node re-decompose; saves fully-hydrated atomics to skill_lib after each approved layer
+- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with three HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-3 UI design), per-node re-decompose with frozen-contract guard and scoped re-lint, contract freeze on HITL-1 approve, and drift check on HITL-2 retry; saves fully-hydrated atomics to skill_lib after each approved layer
 - [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection; real-time job status polling + debug logs
 - [src/skill_lib.py](src/skill_lib.py) — SkillLib class for reading, writing, and searching reusable atomic skills persisted across projects
 - [src/interaction_catalog.py](src/interaction_catalog.py) — fixed catalog of input affordances (TEXT, FILE_UPLOAD, IMAGE_UPLOAD) and output renderers (TEXT, MARKDOWN, TABLE, CODE, IMAGE, FILE_DOWNLOAD) that UIDesigner selects from
@@ -389,16 +461,18 @@ recur-agent/
 │   └── agent_profiles.yaml              # Agent descriptions
 ├── src/
 │   ├── orchestrator/
-│   │   ├── state.py                     # SkillNode, SkillTree (+ required_env_vars +
-│   │   │                                # skill_lib_ref), LayerSnapshot, rollback()
+│   │   ├── state.py                     # SkillNode (+ contract + contract_note),
+│   │   │                                # SkillTree (+ required_env_vars + skill_lib_ref),
+│   │   │                                # Contract (reads/writes/frozen), LayerSnapshot, rollback()
 │   │   └── pipeline.py                  # Main async loop (snapshot -> decompose ->
-│   │                                    #   complexity-review -> HITL-1 -> schema ->
+│   │                                    #   complexity-review -> contract-lint -> HITL-1 -> schema ->
 │   │                                    #   prompt-engineer -> tool-implement -> HITL-2 ->
 │   │                                    #   compile -> verify-repair); saves atomics to skill_lib
 │   ├── agents/
 │   │   ├── base_agent.py                # Anthropic SDK wrapper + retry + token tracking
-│   │   ├── decomposer.py                # DecomposerAgent (ADK constraints + skill_lib injection)
+│   │   ├── decomposer.py                # DecomposerAgent (ADK constraints + skill_lib + contract emission)
 │   │   ├── complexity_reviewer.py       # ComplexityReviewAgent
+│   │   ├── contract_linter.py           # ContractLinterAgent (pure-logic wiring check, optional LLM repair)
 │   │   ├── schema_architect.py          # SchemaArchitectAgent (batches of 5)
 │   │   ├── prompt_engineer.py           # PromptEngineerAgent (state_reads / state_writes)
 │   │   ├── tool_implementor.py          # ToolImplementorAgent (sonnet, 1 node/call, syntax retry)
@@ -474,12 +548,20 @@ Then open **http://127.0.0.1:8000** to review and approve each decomposition lay
 The pipeline pauses after each decomposition layer. Open the dashboard to:
 
 1. Review node cards — each shows name, type badge, exec_type, composition_type, and children
-2. Read `review_note` badges (orange) if the Complexity Reviewer flagged a node
-3. **Edit inline**: click any name or description and type to override (no LLM re-run)
-4. Click **"Save edits"** on a card to persist changes
-5. Click **"Re-decompose"** on a node to have the pipeline retry _only that node_'s subtree with your edits as context
-6. Click **"Approve Layer & Advance"** to run Schema Architect, Prompt Engineer, and Tool Implementor, then proceed to HITL-2
-7. Click **"Rollback This Layer"** to discard all LLM-generated children for this layer and retry from scratch
+2. Read advisory notes:
+   - Orange `review_note` badge (Complexity Reviewer): warnings about over-decomposition or structural oddities
+   - Red `contract_note` badge (Contract Linter): data-flow wiring violations (reads/writes mismatches)
+3. **View contracts** on composite nodes (when declared):
+   - A "Data-flow contract" panel shows the parent node's promised **reads** (green) and **writes** (amber)
+   - Each child's row shows its own **reads** (↓ keys) and **writes** (↑ keys) as inline chips
+   - A **FROZEN** badge appears once the layer is approved (contracts are locked)
+4. **Edit inline**: click any name or description and type to override (no LLM re-run)
+5. Click **"Save edits"** on a card to persist changes
+6. Click **"Re-decompose"** on a composite node to retry only that node's subtree with your edits as context:
+   - Normal nodes: re-decompose immediately
+   - Frozen nodes: confirm that you want to change the contract approved siblings depend on
+7. Click **"Approve Layer & Advance"** to freeze all contracts in this layer, then run Schema Architect, Prompt Engineer, and Tool Implementor, then proceed to HITL-2
+8. Click **"Rollback This Layer"** to discard all LLM-generated children for this layer and retry from scratch
 
 ### HITL-2 — Implementation Review
 
@@ -487,8 +569,11 @@ After schemas, instructions, and function bodies are generated, the pipeline pau
 
 1. Review the generated schemas and function bodies per atomic node
 2. Edit any function body or schema inline if needed
-3. Click **"Approve Implementation"** to compile the full ADK project
-4. Click **"Rollback Implementation"** to discard this layer entirely and retry from decompose
+3. (Optional) Click **"Retry with feedback"** on an atomic node to re-implement only that node:
+   - After regeneration, a drift check compares the frozen declared contract against the new schema
+   - Any dropped outputs or unexpected new inputs are flagged as a contract-drift warning
+4. Click **"Approve Implementation"** to compile the full ADK project
+5. Click **"Rollback Implementation"** to discard this layer entirely and retry from decompose
 
 ---
 
