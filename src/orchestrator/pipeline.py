@@ -13,6 +13,7 @@ from typing import Callable, Awaitable, Optional
 
 from src.agents.compiler import CompilerAgent
 from src.agents.complexity_reviewer import ComplexityReviewAgent
+from src.agents.contract_linter import ContractLinterAgent
 from src.agents.debug import DebugAgent, EnvProvider
 from src.agents.decomposer import DecomposerAgent
 from src.agents.prompt_engineer import PromptEngineerAgent
@@ -33,6 +34,7 @@ class RedecomposeRequest:
     node_id: str
     new_description: Optional[str]
     hint: Optional[str]
+    force_renegotiate: bool = False  # allow redecomposing a node with a FROZEN contract
 
 
 @dataclass
@@ -104,6 +106,7 @@ async def run_pipeline(
 
     decomposer = DecomposerAgent(skill_lib=skill_lib)
     complexity_reviewer = ComplexityReviewAgent()
+    contract_linter = ContractLinterAgent()
     schema_architect = SchemaArchitectAgent()
     prompt_engineer = PromptEngineerAgent()
     tool_implementor = ToolImplementorAgent()
@@ -140,6 +143,12 @@ async def run_pipeline(
         layer_nodes = tree.get_layer_nodes()
         await complexity_reviewer.review(layer_nodes)
 
+        # ── STEP 1c: CONTRACT LINT ─────────────────────────────────────────
+        # Deterministic data-flow check on the just-decomposed composites. Runs before
+        # HITL-1 so wiring violations surface next to complexity warnings, not at runtime.
+        events.status = f"contract_lint_layer_{tree.current_layer}"
+        contract_linter.lint_layer(layer_nodes)
+
         tree.save_json(raw_path)
         events.current_tree = tree
 
@@ -149,7 +158,7 @@ async def run_pipeline(
         events.rollback.clear()
         logger.info("Layer %d ready for human review at http://127.0.0.1:8000", tree.current_layer)
 
-        approved = await _hitl1_loop(tree, events, decomposer, raw_path)
+        approved = await _hitl1_loop(tree, events, decomposer, contract_linter, raw_path)
         if not approved:
             # Rollback requested
             tree.rollback()
@@ -159,6 +168,12 @@ async def run_pipeline(
             events.current_tree = tree
             logger.info("Rollback complete. Retrying layer %d.", tree.current_layer)
             continue
+
+        # Freeze the contracts of every node in the approved layer group: the composites
+        # just reviewed and their children. Approved siblings now depend on this wiring, so
+        # a later redecompose of a frozen node requires explicit force_renegotiate.
+        _freeze_layer_contracts(layer_nodes)
+        tree.save_json(raw_path)
 
         # Do NOT advance the layer here. The Decomposer classifies the INPUT
         # nodes in place: a node that turned ATOMIC stays at its current depth,
@@ -286,10 +301,21 @@ async def run_pipeline(
 # HITL helpers
 # ---------------------------------------------------------------------------
 
+def _freeze_layer_contracts(nodes: list[SkillNode]) -> None:
+    """Freeze the declared contracts of the approved layer's composites and their children."""
+    for node in nodes:
+        if node.contract is not None:
+            node.contract.frozen = True
+        for child in node.children:
+            if child.contract is not None:
+                child.contract.frozen = True
+
+
 async def _hitl1_loop(
     tree: SkillTree,
     events: PipelineEvents,
     decomposer: DecomposerAgent,
+    contract_linter: ContractLinterAgent,
     raw_path: Path,
 ) -> bool:
     """HITL-1: structure review loop.
@@ -297,7 +323,10 @@ async def _hitl1_loop(
     Handles three outcomes:
     - approve → return True
     - rollback → return False
-    - redecompose(node_id, hint) → re-decompose the target node in-place, save, loop
+    - redecompose(node_id, hint) → re-decompose the target node in-place, re-lint, save, loop
+
+    A node with a FROZEN contract is refused unless the request carries force_renegotiate;
+    when forced, the node's sibling group is unfrozen and re-linted before re-presenting.
 
     Returns True if approved, False if full-layer rollback was requested.
     """
@@ -331,6 +360,30 @@ async def _hitl1_loop(
             events.status = f"awaiting_review_layer_{tree.current_layer}"
             continue
 
+        # Freeze guard: refuse to redecompose a node whose contract approved siblings depend
+        # on, unless the human explicitly forced a renegotiation.
+        if node.contract is not None and node.contract.frozen and not req.force_renegotiate:
+            logger.info("Redecompose of frozen node '%s' blocked (no force_renegotiate).", node.name)
+            node.contract_note = (
+                "FROZEN: redecomposing this will renegotiate the contract your approved "
+                "siblings depend on. Re-request with force_renegotiate to proceed."
+            )
+            tree.save_json(raw_path)
+            events.current_tree = tree
+            events.approve.clear()
+            events.rollback.clear()
+            events.status = f"awaiting_review_layer_{tree.current_layer}"
+            continue
+
+        parent = tree.root.find_parent_of(node.id)
+
+        # Forced renegotiation: unfreeze the node's whole sibling group before redecomposing.
+        if req.force_renegotiate:
+            group = ([parent] + parent.children) if parent is not None else [node]
+            for n in group:
+                if n.contract is not None:
+                    n.contract.frozen = False
+
         # Apply the description override if provided
         if req.new_description:
             node.description = req.new_description
@@ -339,16 +392,50 @@ async def _hitl1_loop(
         node.node_type = NodeType.UNKNOWN
         node.exec_type = None
         node.composition_type = None
+        node.contract_note = None
 
         logger.info("Re-decomposing node '%s' (hint: %s)", node.name, req.hint or "none")
         events.status = f"redecomposing_{node.name}"
         await decomposer.decompose([node], hint=req.hint)
+
+        # Scoped re-lint: only the affected group(s). If the node itself became composite,
+        # lint it; also re-lint its parent group since the node's contract may have changed.
+        if node.node_type == NodeType.COMPOSITE:
+            contract_linter.lint_group(node)
+        if parent is not None:
+            contract_linter.lint_group(parent)
 
         tree.save_json(raw_path)
         events.current_tree = tree
         events.approve.clear()
         events.rollback.clear()
         events.status = f"awaiting_review_layer_{tree.current_layer}"
+
+
+def _check_contract_drift(node: SkillNode) -> None:
+    """Warn if a re-implemented atomic's schema no longer satisfies its frozen contract.
+
+    Compares the node's frozen declared contract (state keys) against the view derived
+    from its input/output schemas. Sets node.contract_note on drift; clears it otherwise.
+    Only meaningful for atomics with a frozen contract and hydrated schemas.
+    """
+    if node.contract is None or not node.contract.frozen:
+        return
+    derived = node.schema_contract()
+    if derived is None:
+        return  # not hydrated (e.g. LLM node before schemas) — nothing to compare
+    dropped_writes = set(node.contract.writes.keys()) - set(derived.writes.keys())
+    extra_reads = set(derived.reads.keys()) - set(node.contract.reads.keys())
+    problems: list[str] = []
+    if dropped_writes:
+        problems.append(f"no longer produces {sorted(dropped_writes)}")
+    if extra_reads:
+        problems.append(f"now requires unexpected input(s) {sorted(extra_reads)}")
+    if problems:
+        node.contract_note = "DRIFT: regenerated signature " + "; ".join(problems)
+        logger.info("Contract drift on '%s': %s", node.name, node.contract_note)
+    else:
+        node.contract_note = None
 
 
 async def _hitl2(
@@ -407,6 +494,11 @@ async def _hitl2(
             await prompt_engineer.engineer([node], feedback=req.feedback)
         else:
             await tool_implementor.implement([node], feedback=req.feedback)
+
+        # Drift check: the frozen declared contract must still match the regenerated
+        # signature. This is the smaller signature-vs-frozen-contract check (NOT the
+        # tree-structure lint), surfaced as a warning; it never blocks or rewrites.
+        _check_contract_drift(node)
 
         tree.save_json(verified_path)
         events.current_tree = tree

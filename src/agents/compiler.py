@@ -75,6 +75,21 @@ _STDLIB_TOP_LEVEL = frozenset(
 # Packages already listed as base dependencies — never add them redundantly.
 _BASE_DEPS = frozenset({"google", "dotenv", "adk"})
 
+# Maps import-time module names to their correct PyPI distribution names where they differ.
+_IMPORT_TO_PYPI: dict[str, str] = {
+    "PIL": "Pillow",
+    "cv2": "opencv-python",
+    "sklearn": "scikit-learn",
+    "bs4": "beautifulsoup4",
+    "yaml": "PyYAML",
+    "dotenv": "python-dotenv",
+    "usaddress": "usaddress",
+    "dateutil": "python-dateutil",
+    "Crypto": "pycryptodome",
+    "jwt": "PyJWT",
+    "google.cloud": "google-cloud",
+}
+
 
 def _collect_third_party_deps(tree: SkillTree) -> list[str]:
     """Scan all node implementations for top-level imports; return third-party package names."""
@@ -95,7 +110,7 @@ def _collect_third_party_deps(tree: SkillTree) -> list[str]:
                 and pkg not in _BASE_DEPS
                 and pkg not in seen
             ):
-                seen.add(pkg)
+                seen.add(_IMPORT_TO_PYPI.get(pkg, pkg))
     return sorted(seen)
 
 

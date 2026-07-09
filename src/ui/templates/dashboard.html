@@ -359,6 +359,143 @@
     .node-card.composite { border-top: 3px solid var(--blue); }
     .node-card.unknown { border-top: 3px solid var(--amber); }
 
+    /* Pre-approval advisory banners (Complexity Reviewer + Contract Linter) */
+    .node-warning {
+      font-size: 11px;
+      line-height: 1.4;
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+    .node-warning.review-note {
+      background: var(--amber-bg);
+      color: var(--amber);
+      border: 1px solid var(--amber-border);
+    }
+    .node-warning.contract-note {
+      background: var(--red-bg, #fdecec);
+      color: var(--red, #c0392b);
+      border: 1px solid var(--red-border, #f5c6c6);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn-renegotiate {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 5px;
+      border: 1px solid var(--red, #c0392b);
+      background: transparent;
+      color: var(--red, #c0392b);
+      cursor: pointer;
+    }
+    .btn-renegotiate:hover { background: var(--red, #c0392b); color: #fff; }
+
+    /* Contract flow display */
+    .contract-flow {
+      font-size: 11px;
+      background: var(--surface-2, #f6f8fa);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .contract-flow-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-weight: 600;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary);
+    }
+    .contract-frozen-badge {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--blue-bg);
+      color: var(--blue);
+      border: 1px solid var(--blue-border);
+      letter-spacing: 0.04em;
+    }
+    .contract-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      color: var(--text-secondary);
+    }
+    .contract-direction {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 5px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .contract-direction.reads {
+      background: var(--green-bg);
+      color: var(--green);
+      border: 1px solid var(--green-border);
+    }
+    .contract-direction.writes {
+      background: var(--amber-bg);
+      color: var(--amber);
+      border: 1px solid var(--amber-border);
+    }
+    .contract-keys {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .contract-key {
+      font-size: 10px;
+      font-family: var(--font-mono, monospace);
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+    }
+    .contract-empty {
+      font-size: 10px;
+      color: var(--text-tertiary);
+      font-style: italic;
+    }
+    /* Per-child contract chips in the child edit rows */
+    .child-contract-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      margin-top: 3px;
+    }
+    .child-chip {
+      font-size: 9px;
+      font-family: var(--font-mono, monospace);
+      padding: 1px 4px;
+      border-radius: 3px;
+      border: 1px solid;
+    }
+    .child-chip.r {
+      background: var(--green-bg);
+      color: var(--green);
+      border-color: var(--green-border);
+    }
+    .child-chip.w {
+      background: var(--amber-bg);
+      color: var(--amber);
+      border-color: var(--amber-border);
+    }
+
     /* Card header row */
     .card-top {
       display: flex;
@@ -708,6 +845,22 @@
 
     .save-btn:hover { background: var(--bg); color: var(--text-primary); }
     .save-btn.saved { background: var(--green-bg); border-color: var(--green-border); color: var(--green); }
+
+    .btn-redecompose {
+      font-family: var(--font);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 10px;
+      background: transparent;
+      color: var(--blue);
+      border: 1.5px solid var(--blue-border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+    .btn-redecompose:hover {
+      background: var(--blue-bg);
+    }
 
     /* ── Empty & done states ─────────────────────────────────────────────── */
     .state-card {
@@ -1612,6 +1765,17 @@
     <div class="node-grid" id="node-grid">
       {% for node in nodes %}
       <div class="node-card {{ node.node_type.value }}" id="card-{{ node.id }}">
+        {% if node.review_note %}
+        <div class="node-warning review-note" title="Complexity Reviewer">{{ node.review_note }}</div>
+        {% endif %}
+        {% if node.contract_note %}
+        <div class="node-warning contract-note" title="Contract Linter">
+          {{ node.contract_note }}
+          {% if node.contract and node.contract.frozen %}
+          <button class="btn-renegotiate" onclick="doRedecompose('{{ node.id }}', true)">Renegotiate contract</button>
+          {% endif %}
+        </div>
+        {% endif %}
         <div class="card-top">
           <!-- Type toggle button (HITL-1 feature: change atomic ↔ composite) -->
           <button class="type-toggle-btn" onclick="convertNode('{{ node.id }}', '{{ node.node_type.value }}', this)" title="Click to toggle between atomic and composite">{{ node.node_type.value }}</button>
@@ -1637,6 +1801,41 @@
                   data-field="description"
                   rows="3">{{ node.description }}</textarea>
 
+        {% if node.node_type.value == "composite" and node.contract %}
+        <div class="contract-flow">
+          <div class="contract-flow-header">
+            Data-flow contract
+            {% if node.contract.frozen %}
+            <span class="contract-frozen-badge">FROZEN</span>
+            {% endif %}
+          </div>
+          <div class="contract-row">
+            <span class="contract-direction reads">reads</span>
+            <div class="contract-keys">
+              {% if node.contract.reads %}
+                {% for key, desc in node.contract.reads.items() %}
+                <span class="contract-key" title="{{ desc }}">{{ key }}</span>
+                {% endfor %}
+              {% else %}
+                <span class="contract-empty">nothing (pure generator)</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="contract-row">
+            <span class="contract-direction writes">writes</span>
+            <div class="contract-keys">
+              {% if node.contract.writes %}
+                {% for key, desc in node.contract.writes.items() %}
+                <span class="contract-key" title="{{ desc }}">{{ key }}</span>
+                {% endfor %}
+              {% else %}
+                <span class="contract-empty">nothing (side-effect only)</span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
         {% if node.children %}
         <div class="children-section">
           <div class="children-label">Sub-skills ({{ node.children | length }}) — min 2 required</div>
@@ -1652,6 +1851,16 @@
                   <textarea class="child-desc"
                             rows="1"
                             title="Sub-skill description">{{ child.description }}</textarea>
+                  {% if child.contract %}
+                  <div class="child-contract-chips">
+                    {% for key in child.contract.reads.keys() %}
+                    <span class="child-chip r" title="reads {{ key }}">↓ {{ key }}</span>
+                    {% endfor %}
+                    {% for key in child.contract.writes.keys() %}
+                    <span class="child-chip w" title="writes {{ key }}">↑ {{ key }}</span>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
                 </div>
                 <button class="btn-remove-child" onclick="removeChildRow(this, '{{ node.id }}')" title="Remove this sub-skill">×</button>
               </div>
@@ -1668,6 +1877,13 @@
           <button class="save-btn" onclick="saveComposite('{{ node.id }}', this)">Save edits</button>
           {% else %}
           <button class="save-btn" onclick="saveNode('{{ node.id }}', this)">Save edits</button>
+          {% endif %}
+          {% if node.node_type.value == "composite" %}
+          <button class="btn-redecompose"
+                  onclick="doRedecompose('{{ node.id }}', {{ 'true' if node.contract and node.contract.frozen else 'false' }})"
+                  title="{{ 'Contract is frozen — will prompt for renegotiation' if node.contract and node.contract.frozen else 'Re-decompose this node' }}">
+            {% if node.contract and node.contract.frozen %}Re-decompose (frozen){% else %}Re-decompose{% endif %}
+          </button>
           {% endif %}
           {% if node.input_schema %}
           <span style="font-size:10px;color:var(--text-tertiary);font-weight:500">I/O schema defined</span>
@@ -1956,6 +2172,36 @@ async function saveComposite(nodeId, btn) {
     toast(err.message, 'error');
     btn.textContent = 'Save edits';
     btn.disabled = false;
+  }
+}
+
+// ── HITL-1: Re-decompose a node (optionally renegotiating a frozen contract) ──
+async function doRedecompose(nodeId, forceRenegotiate) {
+  if (forceRenegotiate) {
+    const ok = confirm(
+      'Renegotiate this contract?\n\n' +
+      'This node was frozen when its layer was approved. Re-decomposing it will ' +
+      'change the data-flow contract that its approved siblings depend on, and the ' +
+      'whole group will be re-linted.'
+    );
+    if (!ok) return;
+  }
+  const hint = prompt('Optional correction hint for the re-decomposition (leave blank for none):') || null;
+  try {
+    const r = await fetch('/redecompose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId, hint, force_renegotiate: !!forceRenegotiate }),
+    });
+    if (r.ok) {
+      toast('Re-decomposing… the layer will refresh shortly.', 'success');
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      const d = await r.json().catch(() => ({ detail: 'Re-decompose failed' }));
+      toast(d.detail, 'error');
+    }
+  } catch (err) {
+    toast(err.message, 'error');
   }
 }
 

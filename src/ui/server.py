@@ -290,6 +290,7 @@ class RedecomposePayload(BaseModel):
     node_id: str
     new_description: Optional[str] = None
     hint: Optional[str] = None
+    force_renegotiate: bool = False  # required to redecompose a node with a FROZEN contract
 
 
 @app.post("/redecompose")
@@ -306,6 +307,7 @@ async def redecompose(payload: RedecomposePayload) -> dict:
             node_id=payload.node_id,
             new_description=payload.new_description,
             hint=payload.hint,
+            force_renegotiate=payload.force_renegotiate,
         )
     )
     return {"ok": True, "node_id": payload.node_id}

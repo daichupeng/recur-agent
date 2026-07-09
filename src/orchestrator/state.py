@@ -30,6 +30,24 @@ class CompositionType(str, Enum):
     LLM_COORDINATOR = "LLM_COORDINATOR"  # LlmAgent decides which child to invoke
 
 
+class Contract(BaseModel):
+    """Data-flow contract for a node: the session-state keys it consumes and produces.
+
+    Populated by the DecomposerAgent at classification time — for a composite AND a
+    proposed contract for each of its children — so the ContractLinter can validate the
+    wiring BEFORE schemas exist (i.e. before HITL-1). Frozen once the parent's layer is
+    approved at HITL-1; a frozen contract may only be renegotiated via an explicit
+    force_renegotiate redecompose.
+
+    Distinct from SkillNode.schema_contract(), which is a read-only view derived on the
+    fly from an atomic's input_schema/output_schema and used only for the HITL-2 drift
+    check.
+    """
+    reads: dict[str, str] = Field(default_factory=dict)   # state_key -> type/description
+    writes: dict[str, str] = Field(default_factory=dict)  # state_key -> type/description
+    frozen: bool = False  # locked once the parent's HITL-1 layer is approved
+
+
 class InputAffordance(str, Enum):
     """User input modalities the generated frontend can offer. TEXT is always available."""
     TEXT = "TEXT"                # free-text prompt box
@@ -60,6 +78,8 @@ class SkillNode(BaseModel):
     node_type: NodeType = NodeType.UNKNOWN
     exec_type: Optional[ExecType] = None
     composition_type: Optional[CompositionType] = None
+    contract: Optional[Contract] = None  # Declared data-flow contract; set by DecomposerAgent, linted + frozen at HITL-1
+    contract_note: Optional[str] = None  # Set by ContractLinterAgent; wiring violations shown to human before approval
     input_schema: Optional[dict[str, Any]] = None
     output_schema: Optional[dict[str, Any]] = None
     children: list["SkillNode"] = Field(default_factory=list)
@@ -101,6 +121,39 @@ class SkillNode(BaseModel):
             result.extend(child.topological_order())
         result.append(self)
         return result
+
+    def find_parent_of(self, node_id: str) -> Optional["SkillNode"]:
+        """Depth-first search for the parent of the node with the given id.
+
+        Returns None if node_id is this subtree's root (no parent here) or absent.
+        """
+        for child in self.children:
+            if child.id == node_id:
+                return self
+            found = child.find_parent_of(node_id)
+            if found:
+                return found
+        return None
+
+    def schema_contract(self) -> Optional["Contract"]:
+        """Derive a Contract view from this atomic's input/output schemas.
+
+        Flattens the top-level JSON-Schema property names into reads/writes (values are
+        the stringified property type). Returns None when schemas are absent (e.g. a
+        composite, or an unhydrated atomic). Used only for the HITL-2 drift check — never
+        stored; the declared `contract` field remains the source of truth.
+        """
+        if self.input_schema is None or self.output_schema is None:
+            return None
+
+        def _props(schema: dict[str, Any]) -> dict[str, str]:
+            props = schema.get("properties") or {}
+            return {
+                key: str(spec.get("type", "any")) if isinstance(spec, dict) else "any"
+                for key, spec in props.items()
+            }
+
+        return Contract(reads=_props(self.input_schema), writes=_props(self.output_schema))
 
 
 class LayerSnapshot(BaseModel):

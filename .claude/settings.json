@@ -9,7 +9,11 @@
       "Bash(git commit -m ' *)",
       "Bash(grep -E '\\\\.\\(py|js|ts|tsx|html\\)$')",
       "Bash(python -c \"from src.orchestrator.pipeline import PipelineEvents, RetrySkillRequest; print\\('OK'\\)\")",
-      "Bash(python -c \"from src.ui.server import app; print\\('server OK'\\)\")"
+      "Bash(python -c \"from src.ui.server import app; print\\('server OK'\\)\")",
+      "Bash(python test_contract_linter.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile src/orchestrator/state.py src/orchestrator/pipeline.py src/agents/decomposer.py src/agents/contract_linter.py src/ui/server.py test_contract_linter.py)",
+      "Bash(python -c \"from src.agents.compiler import _collect_third_party_deps; print\\('ok'\\)\")"
     ]
   }
 }

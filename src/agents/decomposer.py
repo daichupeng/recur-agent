@@ -6,7 +6,7 @@ import logging
 from typing import Any, Optional
 
 from src.agents.base_agent import BaseAgent, _find_text_block
-from src.orchestrator.state import CompositionType, ExecType, NodeType, SkillNode
+from src.orchestrator.state import Contract, CompositionType, ExecType, NodeType, SkillNode
 from src.skill_lib import SkillLib
 
 logger = logging.getLogger(__name__)
@@ -78,14 +78,38 @@ Rules of thumb:
 For COMPOSITE nodes, generate 2-3 direct sub-skills at the next level of granularity.
 Sub-skill names must be snake_case function-style identifiers.
 
+## Data-flow contract (every node)
+
+For EVERY node you classify, declare a `contract`: the ADK session-state keys it consumes
+(`reads`) and produces (`writes`). Each is an object mapping a snake_case state key to a
+short type/description string, e.g. {"stripe_event": "dict — raw webhook payload"}.
+
+For a COMPOSITE node you must ALSO propose a `contract` for each child such that the children
+collectively realize the parent's contract given the chosen composition_type. This wiring is
+linted deterministically before human review, so make the keys chain correctly:
+
+- SEQUENTIAL: children run in order. The parent's `reads` are available to the first child;
+  each later child may read any key an earlier sibling wrote. Together the children must end
+  up writing every key in the parent's `writes`.
+- PARALLEL: every child reads only from the parent's `reads` (children cannot see each other's
+  writes). Children must write DISJOINT key sets, and their union must cover the parent's
+  `writes`.
+- LOOP: the single child's `reads` and `writes` must be the SAME key set (shape-stable across
+  iterations) and must include an explicit termination-condition key (e.g. "is_done").
+- LLM_COORDINATOR: each child independently reads a subset of the parent's `reads` and writes a
+  superset of the parent's `writes` (each child is a valid standalone path).
+
+Use consistent snake_case key names so a producer's write key exactly matches a consumer's read key.
+
 You MUST respond with a JSON array parallel to the input array — one entry per input node:
 [
   {
     "node_type": "composite" | "atomic",
     "exec_type": "DETERMINISTIC_CODE" | "EXTERNAL_API" | "LLM_PROMPT" | "OPENSOURCE_LIBRARY" | null,
     "composition_type": "SEQUENTIAL" | "PARALLEL" | "LOOP" | "LLM_COORDINATOR" | null,
+    "contract": {"reads": {"key": "type/desc", ...}, "writes": {"key": "type/desc", ...}},
     "children": [
-      {"name": "...", "description": "..."},
+      {"name": "...", "description": "...", "contract": {"reads": {...}, "writes": {...}}},
       ...
     ]
   },
@@ -94,8 +118,21 @@ You MUST respond with a JSON array parallel to the input array — one entry per
 
 - If node_type is "atomic": exec_type must be set, composition_type must be null, children must be []
 - If node_type is "composite": exec_type must be null, composition_type must be set, children must be non-empty
+- Every node (and every child) must include a "contract" with "reads" and "writes" objects (use {} when empty)
 - The array must have exactly the same length as the input array
 """
+
+# A contract is {reads: {key: type/desc}, writes: {key: type/desc}}. Values are free-form
+# strings; additionalProperties lets the model name arbitrary state keys.
+_CONTRACT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reads": {"type": "object", "additionalProperties": {"type": "string"}},
+        "writes": {"type": "object", "additionalProperties": {"type": "string"}},
+    },
+    "required": ["reads", "writes"],
+    "additionalProperties": False,
+}
 
 _OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "array",
@@ -115,6 +152,7 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
                     {"type": "null"},
                 ]
             },
+            "contract": _CONTRACT_SCHEMA,
             "children": {
                 "type": "array",
                 "items": {
@@ -122,6 +160,7 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
                     "properties": {
                         "name": {"type": "string"},
                         "description": {"type": "string"},
+                        "contract": _CONTRACT_SCHEMA,
                     },
                     "required": ["name", "description"],
                     "additionalProperties": False,
@@ -132,6 +171,15 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "additionalProperties": False,
     },
 }
+
+
+def _parse_contract(raw: Optional[dict[str, Any]]) -> Optional[Contract]:
+    """Build a Contract from an LLM contract dict, tolerating missing/partial data."""
+    if not raw:
+        return None
+    reads = {str(k): str(v) for k, v in (raw.get("reads") or {}).items()}
+    writes = {str(k): str(v) for k, v in (raw.get("writes") or {}).items()}
+    return Contract(reads=reads, writes=writes)
 
 
 class DecomposerAgent(BaseAgent):
@@ -183,6 +231,7 @@ class DecomposerAgent(BaseAgent):
             node.node_type = NodeType(result["node_type"])
             if result.get("exec_type"):
                 node.exec_type = ExecType(result["exec_type"])
+            node.contract = _parse_contract(result.get("contract"))
             if node.node_type == NodeType.COMPOSITE:
                 if result.get("composition_type"):
                     node.composition_type = CompositionType(result["composition_type"])
@@ -192,6 +241,7 @@ class DecomposerAgent(BaseAgent):
                         description=child_dict["description"],
                         parent_id=node.id,
                         depth=node.depth + 1,
+                        contract=_parse_contract(child_dict.get("contract")),
                     )
                     # If this child name matches a skill_lib entry, pre-fill
                     # its fields and mark the reference so we skip re-implementation.
