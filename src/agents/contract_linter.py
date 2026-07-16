@@ -181,19 +181,45 @@ class ContractLinterAgent(BaseAgent):
         return violations
 
     def _detect_coordinator(self, parent: SkillNode) -> list[str]:
+        """Per-capability standalone check for a routing coordinator.
+
+        A coordinator routes to ONE capability per user turn; cross-capability data flows
+        through session state, not structural sequencing. So — unlike SEQUENTIAL/PARALLEL —
+        we do NOT require each child to reproduce the parent's full `writes`. We only require
+        each child to be a valid standalone path (reads a subset of the parent's inputs), plus
+        RoutingSpec-level checks (unresolved child_name, uncovered child, undefined fallback).
+        """
         violations: list[str] = []
         parent_reads = set(parent.contract.reads.keys())
-        parent_writes = set(parent.contract.writes.keys())
+        child_names = {c.name for c in parent.children}
+
         for child in parent.children:
             unmet = _reads(child) - parent_reads
             for key in sorted(unmet):
                 violations.append(
                     f"'{child.name}' reads '{key}' which is not in the parent's inputs"
                 )
-            under = parent_writes - _writes(child)
-            for key in sorted(under):
+
+        # RoutingSpec-aware checks (only when routing metadata is present).
+        routing = parent.routing
+        if routing is not None:
+            routed_children: set[str] = set()
+            for rule in routing.routes:
+                if rule.child_name not in child_names:
+                    violations.append(
+                        f"route target '{rule.child_name}' does not match any child"
+                    )
+                else:
+                    routed_children.add(rule.child_name)
+            fallback = (routing.fallback or "").strip()
+            uncovered = child_names - routed_children
+            if fallback in child_names:
+                uncovered.discard(fallback)
+            for name in sorted(uncovered):
+                violations.append(f"child '{name}' has no route and is not the fallback")
+            if not fallback and not (routing.clarify_when or "").strip():
                 violations.append(
-                    f"'{child.name}' does not write '{key}' (each coordinator branch must be a full path)"
+                    "no fallback and no clarify_when: unmatched user input has no defined behavior"
                 )
         return violations
 

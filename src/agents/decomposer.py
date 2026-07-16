@@ -6,7 +6,15 @@ import logging
 from typing import Any, Optional
 
 from src.agents.base_agent import BaseAgent, _find_text_block
-from src.orchestrator.state import Contract, CompositionType, ExecType, NodeType, SkillNode
+from src.orchestrator.state import (
+    Contract,
+    CompositionType,
+    ExecType,
+    NodeType,
+    RouteRule,
+    RoutingSpec,
+    SkillNode,
+)
 from src.skill_lib import SkillLib
 
 logger = logging.getLogger(__name__)
@@ -64,8 +72,12 @@ LOOP — use ONLY when exactly ONE child repeats until it self-terminates via AD
   Generated as: LoopAgent(sub_agents=[one_agent], max_iterations=10)
   The single sub-agent must call actions.escalate() to terminate.
 
-LLM_COORDINATOR — use ONLY for dynamic routing where the routing logic is ambiguous at
-  design time and cannot be expressed as a sequence.
+LLM_COORDINATOR — a conversational orchestrator at the product boundary. It calls its
+  children as tools (AgentTool), reads their results, and authors ONE final reply to the user
+  in a single voice. Use it for a conversational product whose top-level capabilities are
+  heterogeneous (the user asks for different things on different turns). It can also decline to
+  call anything and ask the user a clarifying question. NOT a fixed sequence; children are
+  independent capabilities, and cross-capability data flows through session state.
 
 ## Composite children limit
 When you do make a node COMPOSITE, generate 2-3 children maximum. If 4-5 children feel
@@ -96,10 +108,30 @@ linted deterministically before human review, so make the keys chain correctly:
   `writes`.
 - LOOP: the single child's `reads` and `writes` must be the SAME key set (shape-stable across
   iterations) and must include an explicit termination-condition key (e.g. "is_done").
-- LLM_COORDINATOR: each child independently reads a subset of the parent's `reads` and writes a
-  superset of the parent's `writes` (each child is a valid standalone path).
+- LLM_COORDINATOR: each child independently reads a subset of the parent's `reads` (each child
+  is a valid standalone capability). Children need NOT each reproduce the parent's full `writes`;
+  the coordinator calls one (or few) capabilities per user turn and authors the reply itself, and
+  cross-capability data flows through session state, not structural sequencing.
 
 Use consistent snake_case key names so a producer's write key exactly matches a consumer's read key.
+
+## Routing (LLM_COORDINATOR nodes only)
+
+When you classify a node as COMPOSITE + LLM_COORDINATOR, ALSO return a `routing` object so a
+human can review how user intents map to capabilities:
+- `routes`: you MUST include EXACTLY ONE entry per child (never leave `routes` empty when there
+  are children). Each is `{child_name, trigger, examples}` where:
+  - `child_name` MUST exactly match one of the children's names.
+  - `trigger`: a short natural-language description of the USER INTENT that maps to this child
+    (what the user is asking for — distinct from what the child does).
+  - `examples`: 1-3 example user utterances that should route here (optional but encouraged).
+- `fallback`: how to handle chit-chat or an unmatched request — either the name of a default
+  child, or an instruction to ask the user a clarifying question. Never leave this empty.
+- `clarify_when`: a natural-language condition under which the coordinator should ask the user
+  for more detail INSTEAD of routing (e.g. "the request is missing a required file or target").
+  Leave "" if the coordinator never needs to clarify.
+
+Only include `routing` for LLM_COORDINATOR nodes; omit it for all other node types.
 
 ## Persistence scope (every state key)
 
@@ -117,6 +149,11 @@ You MUST respond with a JSON array parallel to the input array — one entry per
     "exec_type": "DETERMINISTIC_CODE" | "EXTERNAL_API" | "LLM_PROMPT" | "OPENSOURCE_LIBRARY" | null,
     "composition_type": "SEQUENTIAL" | "PARALLEL" | "LOOP" | "LLM_COORDINATOR" | null,
     "contract": {"reads": {"key": "type/desc", ...}, "writes": {"key": "type/desc", ...}},
+    "routing": {  // LLM_COORDINATOR only; omit otherwise
+      "routes": [{"child_name": "...", "trigger": "...", "examples": ["..."]}],
+      "fallback": "...",
+      "clarify_when": "..."
+    },
     "children": [
       {"name": "...", "description": "...", "contract": {"reads": {...}, "writes": {...}}},
       ...
@@ -147,6 +184,31 @@ _CONTRACT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# Routing metadata for an LLM_COORDINATOR node. Optional at the schema level so non-coordinator
+# nodes simply omit it.
+_ROUTING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "routes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "child_name": {"type": "string"},
+                    "trigger": {"type": "string"},
+                    "examples": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["child_name", "trigger"],
+                "additionalProperties": False,
+            },
+        },
+        "fallback": {"type": "string"},
+        "clarify_when": {"type": "string"},
+    },
+    "required": ["routes"],
+    "additionalProperties": False,
+}
+
 _OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "array",
     "items": {
@@ -166,6 +228,7 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
                 ]
             },
             "contract": _CONTRACT_SCHEMA,
+            "routing": _ROUTING_SCHEMA,
             "children": {
                 "type": "array",
                 "items": {
@@ -199,6 +262,42 @@ def _parse_contract(raw: Optional[dict[str, Any]]) -> Optional[Contract]:
         if str(v) == "PERSISTENT"
     }
     return Contract(reads=reads, writes=writes, scopes=scopes)
+
+
+def _parse_routing(raw: Optional[dict[str, Any]]) -> Optional[RoutingSpec]:
+    """Build a RoutingSpec from an LLM routing dict, tolerating missing/partial data."""
+    if not raw:
+        return None
+    routes = [
+        RouteRule(
+            child_name=str(r.get("child_name", "")),
+            trigger=str(r.get("trigger", "")),
+            examples=[str(e) for e in (r.get("examples") or [])],
+        )
+        for r in (raw.get("routes") or [])
+        if r.get("child_name")
+    ]
+    return RoutingSpec(
+        routes=routes,
+        fallback=str(raw.get("fallback") or ""),
+        clarify_when=str(raw.get("clarify_when") or ""),
+    )
+
+
+# Root-only instruction: bias the boundary node toward a conversational coordinator. Injected
+# only when decomposing a depth-0 node; depth ≥ 1 guidance is unchanged.
+_ROOT_BIAS_HINT = """ROOT NODE GUIDANCE (this node is the product's entry point / boundary):
+Choose composition_type by product shape:
+- Prefer COMPOSITE + LLM_COORDINATOR when the product is CONVERSATIONAL and its top-level
+  capabilities are HETEROGENEOUS (the user may ask for different things on different turns —
+  e.g. "analyze this file" vs "just answer a question" vs "run the whole thing"). A coordinator
+  routes each user message to the right capability and can ask a clarifying question when needed.
+- Choose ATOMIC when the product is single-purpose (one job, no routing).
+- Choose COMPOSITE + SEQUENTIAL only for a genuinely fixed A→B→C pipeline where every input
+  always flows through the same ordered stages.
+When you pick LLM_COORDINATOR, you MUST also return the `routing` object described below. The
+human confirms or overrides this shape at review, so bias toward the conversational coordinator
+for anything that reads like a chatbot / assistant / multi-capability product."""
 
 
 class DecomposerAgent(BaseAgent):
@@ -242,7 +341,10 @@ class DecomposerAgent(BaseAgent):
             + json.dumps(node_dicts, indent=2)
             + skill_context
         )
-        user_content = f"{hint}\n\n{classify_text}" if hint else classify_text
+        # Root-only bias: when the boundary node (depth 0) is in this batch, prepend the
+        # coordinator-root guidance. Composes with the HITL hint channel; depth ≥ 1 unaffected.
+        prefix_parts = [p for p in (hint, _ROOT_BIAS_HINT if any(n.depth == 0 for n in nodes) else None) if p]
+        user_content = "\n\n".join(prefix_parts + [classify_text]) if prefix_parts else classify_text
 
         results = await self._call_with_count_check(user_content, nodes)
 
@@ -254,6 +356,9 @@ class DecomposerAgent(BaseAgent):
             if node.node_type == NodeType.COMPOSITE:
                 if result.get("composition_type"):
                     node.composition_type = CompositionType(result["composition_type"])
+                # A coordinator carries reviewable routing metadata; other composites don't.
+                if node.composition_type == CompositionType.LLM_COORDINATOR:
+                    node.routing = _parse_routing(result.get("routing"))
                 for child_dict in result.get("children", []):
                     child = SkillNode(
                         name=child_dict["name"],

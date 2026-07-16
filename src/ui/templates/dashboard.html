@@ -613,6 +613,54 @@
       flex-shrink: 0;
     }
 
+    /* Routing panel (HITL-1 LLM_COORDINATOR cards) */
+    .routing-panel {
+      margin: 10px 0;
+      padding: 10px;
+      border: 1px solid var(--blue-border);
+      border-radius: 8px;
+      background: var(--blue-bg);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .routing-header {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--blue);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .routing-route {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .routing-child {
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--blue);
+      min-width: 110px;
+    }
+    .routing-trigger, .routing-examples, .routing-fallback, .routing-clarify {
+      flex: 1;
+      min-width: 140px;
+      font-size: 11px;
+      padding: 4px 6px;
+      border: 1px solid var(--border-strong);
+      border-radius: 5px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .routing-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      margin-top: 2px;
+    }
+
     /* Editable children rows (HITL-1 composite cards) */
     .children-edit-list {
       display: flex;
@@ -1903,6 +1951,36 @@
         </div>
         {% endif %}
 
+        {% if node.node_type.value == "composite" and node.composition_type and node.composition_type.value == "LLM_COORDINATOR" %}
+        <div class="routing-panel" id="routing-{{ node.id }}">
+          <div class="routing-header">Routing (LLM coordinator) — how user intents map to capabilities</div>
+          <div class="routing-routes">
+            {% for child in node.children %}
+            {% set rule = None %}
+            {% if node.routing %}
+              {% for r in node.routing.routes %}{% if r.child_name == child.name %}{% set rule = r %}{% endif %}{% endfor %}
+            {% endif %}
+            <div class="routing-route" data-child-name="{{ child.name }}">
+              <span class="routing-child">{{ child.name }}</span>
+              <input class="routing-trigger" type="text" placeholder="user intent that routes here"
+                     value="{{ rule.trigger if rule else '' }}">
+              <input class="routing-examples" type="text" placeholder="example utterances (comma-separated)"
+                     value="{{ rule.examples | join(', ') if rule else '' }}">
+            </div>
+            {% endfor %}
+          </div>
+          <label class="routing-label">Fallback (default child name, or how to handle unmatched input)</label>
+          <input class="routing-fallback" type="text" id="fallback-{{ node.id }}"
+                 placeholder="ask a clarifying question"
+                 value="{{ node.routing.fallback if node.routing else '' }}">
+          <label class="routing-label">Clarify when (ask instead of route — leave blank if never)</label>
+          <input class="routing-clarify" type="text" id="clarify-{{ node.id }}"
+                 placeholder="the request is missing a required file or target"
+                 value="{{ node.routing.clarify_when if node.routing else '' }}">
+          <button class="save-btn" onclick="saveRouting('{{ node.id }}', this)">Save routing</button>
+        </div>
+        {% endif %}
+
         {% if node.children %}
         <div class="children-section">
           <div class="children-label">Sub-skills ({{ node.children | length }}) — min 2 required</div>
@@ -2238,6 +2316,51 @@ async function saveComposite(nodeId, btn) {
   } catch (err) {
     toast(err.message, 'error');
     btn.textContent = 'Save edits';
+    btn.disabled = false;
+  }
+}
+
+// ── HITL-1: Save coordinator routing (manual override, no LLM re-run) ──────────
+async function saveRouting(nodeId, btn) {
+  const panel = document.getElementById('routing-' + nodeId);
+  if (!panel) return;
+  const routes = [];
+  panel.querySelectorAll('.routing-route').forEach(row => {
+    const childName = row.dataset.childName;
+    const trigger = row.querySelector('.routing-trigger').value.trim();
+    const examplesRaw = row.querySelector('.routing-examples').value.trim();
+    const examples = examplesRaw ? examplesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    if (trigger || examples.length) {
+      routes.push({ child_name: childName, trigger, examples });
+    }
+  });
+  const payload = {
+    routes,
+    fallback: document.getElementById('fallback-' + nodeId).value.trim(),
+    clarify_when: document.getElementById('clarify-' + nodeId).value.trim(),
+  };
+
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/edit_routing/${nodeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (r.ok) {
+      btn.classList.add('saved');
+      btn.textContent = 'Saved ✓';
+      setTimeout(() => { btn.classList.remove('saved'); btn.textContent = 'Save routing'; btn.disabled = false; }, 2000);
+    } else {
+      const d = await r.json().catch(() => ({ detail: 'Save failed' }));
+      toast(d.detail, 'error');
+      btn.textContent = 'Save routing';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.textContent = 'Save routing';
     btn.disabled = false;
   }
 }

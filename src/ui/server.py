@@ -897,6 +897,9 @@ async def edit_children(node_id: str, payload: EditChildrenPayload) -> dict:
             raise HTTPException(
                 status_code=422, detail=f"Invalid composition_type: {payload.composition_type}"
             )
+        # Routing only applies to a coordinator; drop it if the type changed away.
+        if node.composition_type != CompositionType.LLM_COORDINATOR:
+            node.routing = None
 
     # Build a map of existing children by id
     child_by_id = {c.id: c for c in node.children}
@@ -991,6 +994,7 @@ async def convert_node(node_id: str, payload: ConvertNodePayload) -> dict:
         node.node_type = NodeType.ATOMIC
         node.children = []
         node.composition_type = None
+        node.routing = None  # no longer a coordinator; drop stale routing
         node.exec_type = ExecType(payload.exec_type or "LLM_PROMPT")
 
     else:
@@ -1028,4 +1032,52 @@ async def edit_impl(node_id: str, payload: EditImplPayload) -> dict:
         node.input_schema = payload.input_schema
     if payload.output_schema is not None:
         node.output_schema = payload.output_schema
+    return {"ok": True, "node_id": node_id}
+
+
+class RouteRulePayload(BaseModel):
+    child_name: str
+    trigger: str = ""
+    examples: list[str] = []
+
+
+class EditRoutingPayload(BaseModel):
+    routes: list[RouteRulePayload] = []
+    fallback: str = ""
+    clarify_when: str = ""
+
+
+@app.post("/edit_routing/{node_id}")
+async def edit_routing(node_id: str, payload: EditRoutingPayload) -> dict:
+    """Manual override of a coordinator node's RoutingSpec (HITL-1; no LLM re-run).
+
+    Replaces node.routing wholesale from the payload, then re-lints the node's group so the
+    RoutingSpec-aware contract checks (unresolved child_name, uncovered child, undefined
+    fallback) refresh next to the routing panel.
+    """
+    from src.agents.contract_linter import ContractLinterAgent
+    from src.orchestrator.state import CompositionType, RouteRule, RoutingSpec
+
+    ev = _require_events()
+    if ev.current_tree is None:
+        raise HTTPException(status_code=404, detail="No active tree")
+    node = ev.current_tree.root.find_node_by_id(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Node {node_id} not found")
+    if node.composition_type != CompositionType.LLM_COORDINATOR:
+        raise HTTPException(
+            status_code=422, detail="Routing can only be edited on an LLM_COORDINATOR node."
+        )
+
+    node.routing = RoutingSpec(
+        routes=[
+            RouteRule(child_name=r.child_name, trigger=r.trigger, examples=r.examples)
+            for r in payload.routes
+            if r.child_name.strip()
+        ],
+        fallback=payload.fallback,
+        clarify_when=payload.clarify_when,
+    )
+    # Refresh routing-aware lint notes for the human.
+    ContractLinterAgent().lint_group(node)
     return {"ok": True, "node_id": node_id}

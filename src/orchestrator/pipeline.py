@@ -418,6 +418,7 @@ async def _hitl1_loop(
         node.exec_type = None
         node.composition_type = None
         node.contract_note = None
+        node.routing = None  # re-decompose may change the node's shape; drop stale routing
 
         logger.info("Re-decomposing node '%s' (hint: %s)", node.name, req.hint or "none")
         events.status = f"redecomposing_{node.name}"
@@ -693,6 +694,21 @@ async def _design_ui(
         events.status = "ui_design"
         logger.info("Designing frontend/interaction contract for %s …", tree.project_name)
         await ui_designer.design(tree)
+
+        # A coordinator root is an orchestrator: it calls capabilities as AgentTools and authors
+        # the single user-facing reply itself (sub-agents run inside the tool call and do NOT
+        # speak to the user). So the root MUST be user-facing, and it is normally the ONLY
+        # user-facing agent. Guarantee it here; otherwise the frontend author filter would hide
+        # the product's own answers ("(No response)"). Guard only; visibility model unchanged.
+        from src.orchestrator.state import CompositionType, NodeVisibility
+        if (
+            tree.root.composition_type == CompositionType.LLM_COORDINATOR
+            and tree.root.visibility != NodeVisibility.USER_FACING
+        ):
+            tree.root.visibility = NodeVisibility.USER_FACING
+            if tree.ui_spec is not None and tree.root.name not in tree.ui_spec.user_facing_nodes:
+                tree.ui_spec.user_facing_nodes.append(tree.root.name)
+            logger.info("Forced coordinator root '%s' user-facing.", tree.root.name)
 
         # Media re-implementation: nodes the designer flagged as media producers need
         # their tool bodies regenerated so they call save_artifact (see tool_implementor

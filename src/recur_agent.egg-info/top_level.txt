@@ -1,5 +1,8 @@
 __init__
 agents
 compiler_templates
+interaction_catalog
+memory_catalog
 orchestrator
+skill_lib
 ui

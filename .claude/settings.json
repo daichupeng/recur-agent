@@ -25,7 +25,25 @@
       "Bash(grep -Ev 'Warning|warn|Deprecat|EXPERIMENTAL|VIRTUAL_ENV|Entry|frozen|^$|Using CPython|Resolved|Audited|Installed|Building|Built|Prepared|Both GOOGLE')",
       "Bash(python -c \"import src.orchestrator.pipeline, src.agents.compiler, src.agents.memory_architect, src.agents.debug, src.agents.tool_implementor, src.ui.server; print\\('all modules import OK'\\)\")",
       "Bash(python3 -m pytest tests/ -x -q)",
-      "Bash(python3 -m pytest test_hitl1_features.py test_contract_linter.py -x -q)"
+      "Bash(python3 -m pytest test_hitl1_features.py test_contract_linter.py -x -q)",
+      "Bash(python -c \"import google.adk; print\\(google.adk.__version__\\)\")",
+      "Bash(grep -iA2 \"adk\\\\|genai\\\\|dependencies\")",
+      "Bash(grep -iA25 \"^dependencies\" pyproject.toml)",
+      "Bash(python -c \"import pytest; print\\('pytest', pytest.__version__\\)\")",
+      "Bash(python -m pytest test_coordinator_routing.py -q)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest test_coordinator_routing.py --ignore=output -q)",
+      "Bash(python -c \"import src.ui.server\")",
+      "Bash(python -c *)",
+      "Bash(python -c \"import json;print\\(json.load\\(open\\('web/ui_manifest.json'\\)\\)['user_facing_agents']\\)\")",
+      "Bash(ls orchestrators/ atomics/)",
+      "Bash(sed -n '1,60p' orchestrators/coach.py)",
+      "Bash(python3 -c 'import ast,sys; ast.parse\\(open\\('\\\\''/Users/chupeng/Documents/Meng_CCDS/recur-agent/output/coach/.venv/lib/python3.11/site-packages/google/adk/tools/agent_tool.py'\\\\''\\).read\\(\\)\\)')",
+      "Bash(rm -rf .venv)",
+      "Bash(UV_PROJECT_ENVIRONMENT=.venv uv sync -q)",
+      "Bash(UV_PROJECT_ENVIRONMENT=.venv uv run python -c \"import sys; sys.path.insert\\(0,'.'\\); import run; print\\('IMPORT OK: root =', run.root_agent.name, '| tools =', [t.name for t in run.root_agent.tools]\\)\")",
+      "Bash(UV_PROJECT_ENVIRONMENT=.venv timeout 180 uv run python -c ' *)",
+      "Bash(UV_PROJECT_ENVIRONMENT=.venv uv run python -c ' *)"
     ],
     "additionalDirectories": [
       "/tmp/tmp*"

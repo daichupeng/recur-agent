@@ -202,10 +202,13 @@ def _validate_tree_for_compile(tree: SkillTree) -> None:
 def _indent_body(body: str) -> str:
     """Jinja2 filter: ensure implementation body has exactly 4-space base indent.
 
-    Dedents whatever the LLM stored, then re-indents to 4 spaces so the
-    rendered output is always syntactically correct inside a def block.
+    Re-bases the LLM-stored body so its first statement sits at 4 spaces, preserving each
+    line's indentation RELATIVE to that first line. We key off the first code line's indent
+    rather than textwrap.dedent's minimum-over-all-lines, because a multi-line string literal
+    (e.g. a triple-quoted prompt) whose interior lines are indented LESS than the surrounding
+    code would corrupt the minimum and leave real statements over-indented — producing an
+    `unexpected indent` SyntaxError inside the generated `def`.
     """
-    import textwrap
     lines = body.splitlines()
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -213,10 +216,16 @@ def _indent_body(body: str) -> str:
         lines.pop()
     if not lines:
         return "    raise NotImplementedError()"
-    dedented = textwrap.dedent("\n".join(lines))
+    first = lines[0]
+    base = len(first) - len(first.lstrip())
     result = []
-    for line in dedented.splitlines():
-        result.append(("    " + line) if line.strip() else "")
+    for line in lines:
+        if not line.strip():
+            result.append("")
+            continue
+        indent = len(line) - len(line.lstrip())
+        # Shift so the first line lands at 4 spaces; keep relative depth for deeper lines.
+        result.append(" " * (max(0, indent - base) + 4) + line.lstrip())
     return "\n".join(result)
 
 
@@ -736,6 +745,7 @@ class CompilerAgent:
             child_imports=child_imports,
             gemini_model=_DEFAULT_GEMINI_MODEL,
             memory_node_id=memory_node_id,
+            routing=node.routing,  # LLM_COORDINATOR routing instruction; None ⇒ thin routing
         )
         try:
             ast.parse(code)

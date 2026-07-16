@@ -1,5 +1,12 @@
-"""{{ node.name }} — LLM coordinator."""
+"""{{ node.name }} — LLM coordinator (orchestrator / single-voice).
+
+This agent calls its capabilities as AgentTools, reads their results back, and authors the
+final answer itself in ONE consistent persona. Sub-agent output is internal working, not a
+separate speaker — so only this coordinator is user-facing. (Contrast: an ADK `sub_agents`
+transfer would let a specialist reply in its own voice.)
+"""
 from google.adk.agents import LlmAgent
+from google.adk.tools.agent_tool import AgentTool
 {%- for imp in child_imports %}
 from {{ imp.module }} import {{ imp.symbol }}
 {%- endfor %}
@@ -13,16 +20,30 @@ from memory._bindings import BEFORE_CALLBACKS, AFTER_CALLBACKS
     description="{{ node.description }}",
     instruction="""{{ node.description }}
 
-Route to the most appropriate sub-agent based on the current context:
+You are the single voice of this product. On each user turn, decide which capability tool(s)
+to call, then compose ONE clear reply to the user from their results. Choose a capability by
+the user's intent:
+{%- if routing and routing.routes %}
+{%- for route in routing.routes %}
+- {{ route.child_name }}: {{ route.trigger }}
+  {%- if route.examples %} (e.g. {% for ex in route.examples %}"{{ ex }}"{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}
+{%- endfor %}
+{%- else %}
 {%- for imp in child_imports %}
 - {{ imp.symbol }}: {{ imp.description }}
 {%- endfor %}
+{%- endif %}
 
-Invoke exactly one sub-agent per turn. Pass relevant context from session state.
+{% if routing and routing.fallback %}If nothing matches, {{ routing.fallback }}.{% else %}If nothing matches and the request is unclear, ask the user a concise clarifying question and end your turn.{% endif %}
+{%- if routing and routing.clarify_when %}
+If {{ routing.clarify_when }}, do NOT call a capability — ask the user a concise clarifying question and end your turn.
+{%- endif %}
+
+Never expose tool names or internal steps to the user; speak naturally as one assistant.
 """,
-    sub_agents=[
+    tools=[
 {%- for imp in child_imports %}
-        {{ imp.symbol }},
+        AgentTool(agent={{ imp.symbol }}),
 {%- endfor %}
     ],
 {%- if memory_node_id %}

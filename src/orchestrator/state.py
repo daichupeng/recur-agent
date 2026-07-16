@@ -59,6 +59,30 @@ class Contract(BaseModel):
     frozen: bool = False  # locked once the parent's HITL-1 layer is approved
 
 
+class RouteRule(BaseModel):
+    """One routing rule for an LLM_COORDINATOR node: which child a user intent maps to.
+
+    `trigger` describes the USER INTENT that should route here (distinct from the child's
+    own `description`, which says what the child does). `examples` are optional user
+    utterances that anchor the route.
+    """
+    child_name: str
+    trigger: str
+    examples: list[str] = Field(default_factory=list)
+
+
+class RoutingSpec(BaseModel):
+    """Reviewable routing metadata for an LLM_COORDINATOR node.
+
+    Set by the DecomposerAgent for coordinator nodes, edited by the human at HITL-1, and
+    rendered by the compiler into the coordinator's instruction. A node with routing=None
+    falls back to today's thin routing (built from each child's description) — back-compat.
+    """
+    routes: list[RouteRule] = Field(default_factory=list)
+    fallback: str = ""       # default child name OR an instruction to ask a clarifying question
+    clarify_when: str = ""   # Feature 2: NL condition under which to ask the user instead of routing
+
+
 class InputAffordance(str, Enum):
     """User input modalities the generated frontend can offer. TEXT is always available."""
     TEXT = "TEXT"                # free-text prompt box
@@ -91,6 +115,7 @@ class SkillNode(BaseModel):
     composition_type: Optional[CompositionType] = None
     contract: Optional[Contract] = None  # Declared data-flow contract; set by DecomposerAgent, linted + frozen at HITL-1
     contract_note: Optional[str] = None  # Set by ContractLinterAgent; wiring violations shown to human before approval
+    routing: Optional["RoutingSpec"] = None  # Set by DecomposerAgent for LLM_COORDINATOR nodes; edited at HITL-1, rendered by compiler. None ⇒ thin routing
     input_schema: Optional[dict[str, Any]] = None
     output_schema: Optional[dict[str, Any]] = None
     children: list["SkillNode"] = Field(default_factory=list)
