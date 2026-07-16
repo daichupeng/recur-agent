@@ -121,7 +121,16 @@ class PromptEngineerAgent(BaseAgent):
         )
 
         text_block = _find_text_block(message)
-        results: list[dict[str, Any]] = json.loads(text_block.text)
+        try:
+            results: list[dict[str, Any]] = json.loads(text_block.text)
+        except json.JSONDecodeError as e:
+            # Log the problematic JSON for debugging
+            logger.error("Failed to parse PromptEngineer output: %s", e)
+            logger.error("Text block (first 500 chars): %s", text_block.text[:500])
+            raise ValueError(
+                f"PromptEngineer returned invalid JSON: {e}. "
+                f"See logs for output sample."
+            ) from e
 
         if len(results) != len(nodes):
             raise ValueError(

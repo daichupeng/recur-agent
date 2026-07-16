@@ -121,13 +121,35 @@ class BaseAgent:
                         # Haiku occasionally serialises the inner array as a JSON string
                         # instead of a real list — parse it when that happens.
                         payload = tool_block.input
+                        logger.debug("Tool input type: %s", type(payload).__name__)
+                        if not isinstance(payload, dict):
+                            raise ValueError(
+                                f"Expected tool_block.input to be dict, got {type(payload).__name__}"
+                            )
                         if output_schema.get("type") == "array" and "results" in payload:
                             payload = payload["results"]
                             if isinstance(payload, str):
-                                payload = json.loads(payload)
+                                # The "results" value may itself be a stringified JSON array
+                                # (Haiku quirk). Parse it to get the actual list.
+                                logger.debug("Parsing stringified results array (len=%d)", len(payload))
+                                try:
+                                    payload = json.loads(payload)
+                                except (json.JSONDecodeError, TypeError) as e:
+                                    # If parsing fails, log and re-raise
+                                    logger.error("Failed to parse stringified results: %s", e)
+                                    raise
+                        # Convert the parsed tool input back to JSON text. Use default
+                        # separators and ensure_ascii=True for proper escaping of all
+                        # special characters (including quotes, newlines, etc.).
+                        json_text = json.dumps(payload, ensure_ascii=True)
+                        logger.debug(
+                            "Converted tool_use structured output to JSON (len=%d, first 200 chars): %s",
+                            len(json_text),
+                            json_text[:200],
+                        )
                         text_content = _ant.types.TextBlock(
                             type="text",
-                            text=json.dumps(payload),
+                            text=json_text,
                         )
                         message.content = [text_content]
                 return message
