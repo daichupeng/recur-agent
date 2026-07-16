@@ -71,7 +71,7 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
   |    SEQUENTIAL: running state available   |
   |    PARALLEL: disjoint writes, coverage   |
   |    LOOP: shape-stable, termination key   |
-  |    LLM_COORDINATOR: each path complete   |
+  |    LLM_COORDINATOR: each child standalone|
   |  attach contract_note to flagged nodes   |
   |  (violations shown as warnings in UI)    |
   +------------------------------------------+
@@ -281,6 +281,69 @@ node in the tree is ATOMIC and no deeper layer has any nodes left.
 
 ---
 
+## Coordinator Root + Conversational Routing
+
+The **root node** (the product's entry point) gets special decomposition guidance: for a
+conversational product with heterogeneous top-level capabilities (the user asks for different
+things on different turns), the Decomposer is biased toward `COMPOSITE + LLM_COORDINATOR`
+instead of a fixed `SEQUENTIAL` pipeline. This bias only applies at depth 0 — decomposition at
+depth ≥ 1 is unchanged (ATOMIC-first / SEQUENTIAL as before). The human can always override the
+suggested shape at HITL-1.
+
+### Coordinator = orchestrator, not router
+
+A `LLM_COORDINATOR` node compiles to an ADK `LlmAgent` that calls its children as **tools**
+(`AgentTool`), not as `sub_agents` transfer targets:
+
+```python
+orchestrators/{name}.py:
+    LlmAgent(
+        instruction="...routing instruction below...",
+        tools=[AgentTool(agent=child_agent), ...],
+    )
+```
+
+The coordinator reads each tool's result and authors **one final reply** in a single persona —
+sub-agent output is internal working state, never a separate voice the user sees. This matters
+because ADK `sub_agents` transfer lets the routed specialist author the reply directly, which
+gets attributed to that sub-agent and hidden by the frontend's `user_facing_agents` filter
+(surfacing as a "(No response)" bug). `SequentialAgent`/`ParallelAgent` orchestrators also now
+expose their children's tools upward (`_child_tools` collected in the Jinja templates) so a
+coordinator nested inside a bigger tree can still reach leaf capabilities.
+
+Consequence: for a coordinator root, `user_facing_agents=[root]` is correct — only the
+coordinator speaks. The pipeline forces the root `USER_FACING` right before UI design
+whenever `composition_type == LLM_COORDINATOR`, so this can never be misconfigured away.
+
+### RoutingSpec
+
+When the Decomposer classifies a node as `LLM_COORDINATOR`, it also emits a `routing` object:
+
+- **routes**: one `{child_name, trigger, examples}` entry per child — `trigger` is the *user
+  intent* that should route here (distinct from what the child does), `examples` are optional
+  sample utterances.
+- **fallback**: a default child name, or an instruction to ask a clarifying question, for
+  chit-chat / unmatched requests.
+- **clarify_when**: an NL condition under which the coordinator should ask the user for more
+  detail instead of routing at all (conversational clarification).
+
+`routing=None` falls back to today's thin routing (built from each child's `description`).
+
+The **Contract Linter**'s coordinator check is RoutingSpec-aware: every route's `child_name`
+must resolve to a real child, every child must be either routed or the fallback, and a fallback
+or `clarify_when` must be defined — otherwise unmatched user input has no defined behavior.
+
+### HITL-1: routing panel
+
+Coordinator node cards show a routing panel — one row per child with an editable trigger +
+examples field, plus fallback and clarify-when fields. **"Save routing"** posts to
+`POST /edit_routing/{node_id}` (manual override, no LLM re-run) and re-lints the node's group so
+RoutingSpec violations refresh immediately. Stale routing is cleared whenever the node's shape
+changes: re-decompose, `composition_type` edited away from `LLM_COORDINATOR`, or `convert_node`
+to ATOMIC.
+
+---
+
 ## UI Design (HITL-3)
 
 After the entire skill tree is decomposed and implemented, the **UIDesignerAgent** designs the product's frontend by selecting from a fixed interaction catalog:
@@ -416,7 +479,7 @@ The `DecomposerAgent` emits contracts at classification time — for the composi
 | **SEQUENTIAL** | Child reads must be subset of parent reads + what earlier siblings wrote. Final union of writes must satisfy parent writes. |
 | **PARALLEL** | Each child's reads ⊆ parent reads (no inter-sibling data). Children's writes must be disjoint. Union of writes must cover parent writes. |
 | **LOOP** | Single child's reads and writes must be identical key set (shape-stable). Must include a termination-condition key (e.g. `is_done`). |
-| **LLM_COORDINATOR** | Each child is an independent path: child reads ⊆ parent reads, child writes ⊇ parent writes. |
+| **LLM_COORDINATOR** | Each child's reads ⊆ parent reads (a valid standalone capability). Children need NOT reproduce the parent's full writes — the coordinator calls one capability per turn and authors the reply itself; cross-capability data flows through session state. Plus RoutingSpec checks: every route's `child_name` resolves, every child is either routed or the fallback, and a fallback or `clarify_when` is defined. |
 
 **Violations** are attached to composite nodes as `contract_note` and shown as red banners in the HITL-1 UI, alongside complexity warnings.
 
@@ -471,9 +534,9 @@ Everything else is **composite** and will be further decomposed.
 
 ### Platform Engine (this repo)
 Uses the **Anthropic SDK** for internal agents:
-- [src/agents/decomposer.py](src/agents/decomposer.py) — classifies and expands nodes; enforces ADK composition rules in system prompt; injects skill_lib context for pre-filling from reusable library; emits declared data-flow contracts (reads/writes) for every node at classification time
+- [src/agents/decomposer.py](src/agents/decomposer.py) — classifies and expands nodes; enforces ADK composition rules in system prompt; injects skill_lib context for pre-filling from reusable library; emits declared data-flow contracts (reads/writes) for every node at classification time; root-only bias toward `LLM_COORDINATOR` for conversational products; emits `RoutingSpec` for coordinator nodes
 - [src/agents/complexity_reviewer.py](src/agents/complexity_reviewer.py) — flags over-split or structurally odd decompositions
-- [src/agents/contract_linter.py](src/agents/contract_linter.py) — pure-logic deterministic wiring check: for each composite, verifies children's contracts chain correctly per composition_type; no auto-fix; surfaces violations to human at HITL-1
+- [src/agents/contract_linter.py](src/agents/contract_linter.py) — pure-logic deterministic wiring check: for each composite, verifies children's contracts chain correctly per composition_type; no auto-fix; surfaces violations to human at HITL-1; RoutingSpec-aware coordinator check (unresolved child_name, uncovered child, missing fallback/clarify_when)
 - [src/agents/schema_architect.py](src/agents/schema_architect.py) — hydrates I/O JSON Schema for every unhydrated atomic in the tree
 - [src/agents/prompt_engineer.py](src/agents/prompt_engineer.py) — writes ADK session-state-aware instructions for LLM_PROMPT nodes
 - [src/agents/tool_implementor.py](src/agents/tool_implementor.py) — generates Python function bodies; prefers domain client libraries over raw HTTP; mandates `os.environ` for credentials; uses claude-sonnet-4-6 with syntax validation and retry
@@ -481,8 +544,8 @@ Uses the **Anthropic SDK** for internal agents:
 - [src/agents/memory_architect.py](src/agents/memory_architect.py) — designs persistent-memory contract: triage to collect PERSISTENT keys, select backends (KEY_VALUE / APPEND_LOG / SEMANTIC), wire save/load bindings. Produces MemorySpec (structured only); Compiler transforms into adapters
 - [src/agents/ui_designer.py](src/agents/ui_designer.py) — selects input affordances, output renderers, user-facing agents, and media outputs from a fixed catalog; produces UISpec for Compiler
 - [src/agents/compiler.py](src/agents/compiler.py) — tree-recursive Jinja2 compiler; auto-collects third-party deps and required env vars from generated implementations; emits memory adapters (memory/_store.py, memory/<entity>.py, memory/_bindings.py) and before/after callbacks; emits frontend (web/index.html, ui_manifest.json, serve.py) when UISpec is present; copies referenced skill_lib files into output
-- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with four HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-4 memory, HITL-3 UI design), per-node re-decompose with frozen-contract guard and scoped re-lint, contract freeze on HITL-1 approve, drift check on HITL-2 retry, ancestor PERSISTENT-key hint passed to PromptEngineer, memory validation before debug loop, saves fully-hydrated atomics to skill_lib after each approved layer
-- [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection; real-time job status polling + debug logs
+- [src/orchestrator/pipeline.py](src/orchestrator/pipeline.py) — main async loop with four HITL checkpoints (HITL-1 structure, HITL-2 implementation, HITL-4 memory, HITL-3 UI design), per-node re-decompose with frozen-contract guard and scoped re-lint (clears stale routing), contract freeze on HITL-1 approve, drift check on HITL-2 retry, ancestor PERSISTENT-key hint passed to PromptEngineer, memory validation before debug loop, saves fully-hydrated atomics to skill_lib after each approved layer; forces a coordinator root `USER_FACING` before UI design
+- [src/ui/server.py](src/ui/server.py) — FastAPI HITL dashboard + sandbox management + credential injection; real-time job status polling + debug logs; `POST /edit_routing/{node_id}` manual RoutingSpec override + re-lint (HITL-1)
 - [src/skill_lib.py](src/skill_lib.py) — SkillLib class for reading, writing, and searching reusable atomic skills persisted across projects
 - [src/interaction_catalog.py](src/interaction_catalog.py) — fixed catalog of input affordances (TEXT, FILE_UPLOAD, IMAGE_UPLOAD) and output renderers (TEXT, MARKDOWN, TABLE, CODE, IMAGE, FILE_DOWNLOAD) that UIDesigner selects from
 
