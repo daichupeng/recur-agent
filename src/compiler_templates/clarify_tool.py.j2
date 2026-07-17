@@ -1,0 +1,30 @@
+"""Shared clarification tool for LLM_COORDINATOR agents.
+
+Calling this tool signals that the coordinator needs more information before it
+can call a capability. It does no work itself — the coordinator must still
+compose its own natural-language question as the visible reply. This exists so
+"pausing to ask" is a structured, traceable event rather than free text that
+might get skipped under prompt drift.
+"""
+from google.adk.tools import FunctionTool
+
+
+def request_clarification(question: str, missing_info: str) -> dict:
+    """Pause and ask the user instead of calling a capability tool.
+
+    Call this INSTEAD of any capability tool when required information is
+    missing or ambiguous. Never call this in the same turn as a capability
+    tool. After calling it, ask the user `question` directly in your own
+    reply — do not rely on this tool's return value for user-facing text.
+
+    Args:
+        question: The exact question to put to the user next.
+        missing_info: A short phrase naming what's missing, e.g. "target date".
+
+    Returns:
+        A status object. Not user-facing.
+    """
+    return {"status": "awaiting_user_input", "missing_info": missing_info}
+
+
+request_clarification_tool = FunctionTool(func=request_clarification)

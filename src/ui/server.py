@@ -398,6 +398,7 @@ class EditUIPayload(BaseModel):
     output_renderers: Optional[list[str]] = None
     example_prompts: Optional[list[str]] = None
     user_facing_nodes: Optional[list[str]] = None
+    show_agent_trace: Optional[bool] = None
 
 
 @app.post("/edit_ui")
@@ -447,6 +448,8 @@ async def edit_ui(payload: EditUIPayload) -> dict:
             node.visibility = (
                 NodeVisibility.USER_FACING if node.name in chosen else NodeVisibility.INTERNAL
             )
+    if payload.show_agent_trace is not None:
+        spec.show_agent_trace = payload.show_agent_trace
 
     return {"ok": True}
 

@@ -17,7 +17,8 @@ from src.orchestrator.state import (
     ExecType,
     MemoryBackend,
     NodeType,
-    NodeVisibility,
+    RouteRule,
+    RoutingSpec,
     SkillNode,
     SkillTree,
 )
@@ -63,6 +64,12 @@ _COMPOSITE_TEMPLATES: dict[CompositionType, str] = {
     CompositionType.LOOP: "adk_loop_agent.py.j2",
     CompositionType.LLM_COORDINATOR: "adk_coordinator_agent.py.j2",
 }
+
+# Root composition types that leak sub_agents' own authored events into /run_sse and
+# therefore need a synthetic single-voice coordinator wrapped around them.
+_NEEDS_ROOT_WRAP = frozenset(
+    {CompositionType.SEQUENTIAL, CompositionType.PARALLEL, CompositionType.LOOP}
+)
 
 
 def _pydantic_type(schema: dict[str, Any]) -> str:
@@ -345,7 +352,58 @@ class CompilerAgent:
         else:
             root_module = f"orchestrators.{tree.root.name}"
 
+        # Enforce the coordinator-root invariant: exactly one agent ever authors a
+        # user-visible message. LLM_COORDINATOR roots already guarantee this (their
+        # children are AgentTool-wrapped); ATOMIC roots trivially guarantee it (no
+        # children to leak). SEQUENTIAL/PARALLEL/LOOP roots run their children as
+        # sub_agents in the shared session, which leaks each child's own authored
+        # events — so wrap those behind a synthetic single-voice coordinator, reusing
+        # the same adk_coordinator_agent.py.j2 template (no new template, no LLM call).
+        needs_root_wrapper = (
+            tree.root.node_type != NodeType.ATOMIC
+            and tree.root.composition_type in _NEEDS_ROOT_WRAP
+        )
+        if needs_root_wrapper:
+            required = (tree.root.input_schema or {}).get("required", [])
+            clarify_when = (
+                f"the user's message doesn't provide values for: {', '.join(required)}"
+                if required
+                else "the user's request is missing information this capability needs to run"
+            )
+            wrapper_routing = RoutingSpec(
+                routes=[
+                    RouteRule(
+                        child_name=root_symbol,
+                        trigger="every user request — this is the product's only capability",
+                    )
+                ],
+                fallback="",
+                clarify_when=clarify_when,
+            )
+            wrapper_node = SkillNode(name="__root_coordinator", description=tree.root.description)
+            wrapper_import = _Import(
+                module=root_module, symbol=root_symbol, description=tree.root.description
+            )
+            coord_tmpl = self._env.get_template("adk_coordinator_agent.py.j2")
+            wrapper_code = coord_tmpl.render(
+                node=wrapper_node,
+                child_imports=[wrapper_import],
+                gemini_model=_DEFAULT_GEMINI_MODEL,
+                memory_node_id=None,
+                routing=wrapper_routing,
+            )
+            ast.parse(wrapper_code)
+            (orchestrators_dir / "__root_coordinator.py").write_text(wrapper_code)
+            root_module, root_symbol = "orchestrators.__root_coordinator", "__root_coordinator_agent"
+
         has_memory = tree.memory_spec is not None
+        has_coordinator = needs_root_wrapper or any(
+            n.composition_type == CompositionType.LLM_COORDINATOR
+            for n in tree.root.topological_order()
+        )
+        if has_coordinator:
+            clarify_tmpl = self._env.get_template("clarify_tool.py.j2")
+            (project_dir / "clarify_tool.py").write_text(clarify_tmpl.render())
 
         # Render interactive entry point (run.py)
         run_tmpl = self._env.get_template("adk_root_orchestrator.py.j2")
@@ -392,7 +450,11 @@ class CompilerAgent:
         # Generated frontend + interaction contract (only when the UI Designer ran).
         # Legacy trees (ui_spec is None) skip this entirely and compile as before.
         if tree.ui_spec is not None:
-            self._compile_frontend(tree, project_dir, has_memory=has_memory)
+            # root_symbol is always "{agent_name}_agent" (see _compile_node/_compile_composite
+            # and the wrapper above) — the ADK agent's `name=` is the part before that suffix,
+            # and that's the event.author the frontend actually filters on.
+            root_agent_name = root_symbol.removesuffix("_agent")
+            self._compile_frontend(tree, project_dir, has_memory=has_memory, root_agent_name=root_agent_name)
 
         # Scan implementations for third-party packages and required env vars
         third_party_deps = _collect_third_party_deps(tree)
@@ -490,21 +552,23 @@ class CompilerAgent:
     # Generated frontend + interaction contract
     # ------------------------------------------------------------------
 
-    def _compile_frontend(self, tree: SkillTree, project_dir: Path, *, has_memory: bool = False) -> None:
+    def _compile_frontend(
+        self, tree: SkillTree, project_dir: Path, *, has_memory: bool = False, root_agent_name: str
+    ) -> None:
         """Emit web/index.html, web/ui_manifest.json, and serve.py from tree.ui_spec.
 
-        user_facing_agents is computed from node.visibility using the already
-        snake_cased node.name — that value equals the ADK LlmAgent name, which is
-        exactly the `event.author` string the frontend filters on at runtime.
+        user_facing_agents is exactly [root_agent_name]: the coordinator-root invariant
+        (enforced at compile time — see needs_root_wrapper in compile()) guarantees exactly
+        one agent ever authors a user-visible message, whatever composition type the
+        Decomposer picked for the root. root_agent_name is that agent's ADK `name=`, which
+        equals the `event.author` string the frontend filters on at runtime. NodeVisibility
+        / node.visibility still governs output_media_types in ui_designer.py — unrelated to
+        this voice-gating list.
         """
         ui = tree.ui_spec
         assert ui is not None
 
-        user_facing_agents = [
-            node.name
-            for node in tree.root.topological_order()
-            if node.visibility == NodeVisibility.USER_FACING
-        ]
+        user_facing_agents = [root_agent_name]
 
         web_dir = project_dir / "web"
         web_dir.mkdir(exist_ok=True)
@@ -519,6 +583,7 @@ class CompilerAgent:
             output_renderers=[r.value for r in ui.output_renderers],
             example_prompts=ui.example_prompts,
             user_facing_agents=user_facing_agents,
+            show_agent_trace=ui.show_agent_trace,
         )
         # Validate the rendered manifest is well-formed JSON before writing.
         json.loads(manifest)

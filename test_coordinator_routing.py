@@ -6,6 +6,7 @@ coordinator template rendering (routing vs thin/back-compat), and a full coordin
 compile. No LLM / no Gemini calls — pure logic + Jinja rendering.
 """
 import ast
+import json
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -18,6 +19,7 @@ from src.orchestrator.state import (
     Contract,
     ExecType,
     NodeType,
+    NodeVisibility,
     RouteRule,
     RoutingSpec,
     SkillNode,
@@ -172,7 +174,9 @@ def test_template_with_routing():
     assert "faq_agent: answer a question" in code
     assert '"hours?"' in code
     assert "If nothing matches, ask a clarifying question." in code
-    assert "If the order id is missing, do NOT call a capability" in code  # Feature 2 clause
+    assert "If the order id is missing, call request_clarification instead of any capability tool" in code  # Feature 2 clause
+    assert "from clarify_tool import request_clarification_tool" in code
+    assert "request_clarification_tool," in code
     # Model A: children wrapped as AgentTools, coordinator authors the reply (no transfer).
     assert "AgentTool(agent=faq_agent)" in code
     assert "tools=[" in code and "sub_agents=[" not in code
@@ -195,6 +199,37 @@ def test_template_back_compat_thin_routing():
     assert "AgentTool(agent=faq_agent)" in code
     assert "sub_agents=[" not in code
     print("✓ routing=None renders capability list from child descriptions (back-compat)")
+
+
+def test_template_clarify_tool_wired_before_capabilities():
+    # No live LLM call is made here — this test only checks that the compiled
+    # source structurally forces a clarify call to be distinguishable from a
+    # capability call: request_clarification_tool is a separate tools[] entry
+    # (not folded into a capability's AgentTool), listed before them, and the
+    # instruction explicitly tells the model never to call both in one turn.
+    routing = RoutingSpec(
+        routes=[RouteRule(child_name="faq_agent", trigger="answer a question")],
+        fallback="", clarify_when="the order id is missing",
+    )
+    code = _render_coordinator(routing)
+    clarify_idx = code.index("request_clarification_tool,")
+    agent_tool_idx = code.index("AgentTool(agent=faq_agent)")
+    assert clarify_idx < agent_tool_idx
+    assert "Never call request_clarification in the same turn as a capability tool." in code
+    print("✓ request_clarification_tool is wired as its own tool before capability AgentTools")
+
+
+def test_clarify_tool_template_renders_valid_stateless_python():
+    env = Environment(loader=FileSystemLoader(str(_TEMPLATES)))
+    code = env.get_template("clarify_tool.py.j2").render()
+    tree = ast.parse(code)
+    names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert "request_clarification" in names
+    assert "request_clarification_tool" in code
+    # Stateless: the function only builds a dict from its own arguments.
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "request_clarification")
+    assert len(fn.args.args) == 2  # question, missing_info — no hidden agent/session params
+    print("✓ clarify_tool.py.j2 compiles to a single stateless FunctionTool")
 
 
 # ── Full coordinator-root compile ─────────────────────────────────────────────
@@ -231,10 +266,115 @@ def test_coordinator_root_compiles(tmp_path):
     ast.parse(coord)
     assert "answer_question: answer a general question" in coord
     assert "If nothing matches, ask a clarifying question." in coord
-    assert "If no input is provided, do NOT call a capability" in coord
+    assert "If no input is provided, call request_clarification instead of any capability tool" in coord
     assert "AgentTool(agent=answer_question_agent)" in coord
     assert "tools=[" in coord and "sub_agents=[" not in coord
+    assert (project_dir / "clarify_tool.py").exists()
     print("✓ coordinator-root project compiles with routing + AgentTool wiring")
+
+
+# ── Coordinator-root enforcement: SEQUENTIAL/PARALLEL/LOOP roots get wrapped ──
+
+def _sequential_root_tree(project_name="pipeline"):
+    root = SkillNode(
+        name="pipeline", description="A two-step pipeline", depth=0,
+        node_type=NodeType.COMPOSITE, composition_type=CompositionType.SEQUENTIAL,
+        input_schema={"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]},
+    )
+    root.children = [_atomic("step_one", "first step"), _atomic("step_two", "second step")]
+    for c in root.children:
+        c.depth = 1
+        c.parent_id = root.id
+    return SkillTree(project_name=project_name, requirement="A two-step pipeline", root=root)
+
+
+def test_sequential_root_gets_wrapped(tmp_path):
+    tree = _sequential_root_tree()
+    project_dir = CompilerAgent().compile(tree, tmp_path)
+
+    wrapper_path = project_dir / "orchestrators" / "__root_coordinator.py"
+    assert wrapper_path.exists()
+    wrapper = wrapper_path.read_text()
+    ast.parse(wrapper)
+    assert "from orchestrators.pipeline import pipeline_agent" in wrapper
+    assert "AgentTool(agent=pipeline_agent)" in wrapper
+    assert "request_clarification_tool" in wrapper
+    assert wrapper.index("request_clarification_tool,") < wrapper.index("AgentTool(agent=pipeline_agent)")
+    assert "the user's message doesn't provide values for: topic" in wrapper
+
+    agent_entry = (project_dir / "agent.py").read_text()
+    assert "from orchestrators.__root_coordinator import __root_coordinator_agent as root_agent" in agent_entry
+    assert (project_dir / "clarify_tool.py").exists()
+    print("✓ SEQUENTIAL root gets wrapped by a synthesized __root_coordinator")
+
+
+def test_llm_coordinator_root_not_wrapped(tmp_path):
+    root = SkillNode(
+        name="assistant", description="A multi-capability assistant", depth=0,
+        node_type=NodeType.COMPOSITE, composition_type=CompositionType.LLM_COORDINATOR,
+        contract=Contract(reads={"msg": "str"}, writes={}),
+        routing=RoutingSpec(
+            routes=[RouteRule(child_name="answer_question", trigger="answer a general question")],
+            fallback="ask a clarifying question", clarify_when="no input is provided",
+        ),
+    )
+    root.children = [_atomic("answer_question", "general Q&A")]
+    root.children[0].depth = 1
+    root.children[0].parent_id = root.id
+    tree = SkillTree(project_name="assistant2", requirement="req", root=root)
+
+    project_dir = CompilerAgent().compile(tree, tmp_path)
+    assert not (project_dir / "orchestrators" / "__root_coordinator.py").exists()
+    agent_entry = (project_dir / "agent.py").read_text()
+    assert "from orchestrators.assistant import assistant_agent as root_agent" in agent_entry
+    print("✓ LLM_COORDINATOR root is not double-wrapped")
+
+
+def test_atomic_root_not_wrapped(tmp_path):
+    root = _atomic("solo", "does everything")
+    tree = SkillTree(project_name="solo_proj", requirement="req", root=root)
+
+    project_dir = CompilerAgent().compile(tree, tmp_path)
+    assert not (project_dir / "orchestrators").exists() or not list(
+        (project_dir / "orchestrators").glob("__root_coordinator*")
+    )
+    agent_entry = (project_dir / "agent.py").read_text()
+    assert "from atomics.solo import solo_agent as root_agent" in agent_entry
+    print("✓ ATOMIC root is not wrapped")
+
+
+def test_wrapped_root_manifest_single_voice(tmp_path):
+    from src.orchestrator.state import UISpec
+
+    tree = _sequential_root_tree(project_name="pipeline_ui")
+    tree.ui_spec = UISpec(title="Pipeline")
+    # Simulate a UIDesigner that (incorrectly, pre-enforcement) marked multiple nodes
+    # user_facing — the manifest must still gate on the single wrapper voice.
+    for node in tree.root.topological_order():
+        node.visibility = NodeVisibility.USER_FACING
+
+    project_dir = CompilerAgent().compile(tree, tmp_path)
+    manifest = json.loads((project_dir / "web" / "ui_manifest.json").read_text())
+    assert manifest["user_facing_agents"] == ["__root_coordinator"]
+    print("✓ wrapped root's manifest user_facing_agents is exactly the single wrapper voice")
+
+
+def test_wrapper_clarify_when_falls_back_without_required(tmp_path):
+    root = SkillNode(
+        name="pipeline", description="A pipeline", depth=0,
+        node_type=NodeType.COMPOSITE, composition_type=CompositionType.PARALLEL,
+        input_schema=None,
+    )
+    root.children = [_atomic("a", "a"), _atomic("b", "b")]
+    for c in root.children:
+        c.depth = 1
+        c.parent_id = root.id
+    tree = SkillTree(project_name="parallel_proj", requirement="req", root=root)
+
+    project_dir = CompilerAgent().compile(tree, tmp_path)
+    wrapper = (project_dir / "orchestrators" / "__root_coordinator.py").read_text()
+    assert "the user's request is missing information this capability needs to run" in wrapper
+    print("✓ wrapper clarify_when falls back to a generic phrase when input_schema has no required list")
 
 
 # ── _indent_body: multi-line string interior must not corrupt dedent ──────────

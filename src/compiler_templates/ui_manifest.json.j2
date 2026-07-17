@@ -7,6 +7,7 @@
   "output_renderers": {{ output_renderers | tojson }},
   "example_prompts": {{ example_prompts | tojson }},
   "user_facing_agents": {{ user_facing_agents | tojson }},
+  "show_agent_trace": {{ show_agent_trace | tojson }},
   "endpoints": {
     "create_session": "/apps/{{ project_name }}/users/user/sessions",
     "run_sse": "/run_sse",

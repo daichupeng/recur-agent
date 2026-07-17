@@ -7,6 +7,7 @@ transfer would let a specialist reply in its own voice.)
 """
 from google.adk.agents import LlmAgent
 from google.adk.tools.agent_tool import AgentTool
+from clarify_tool import request_clarification_tool
 {%- for imp in child_imports %}
 from {{ imp.module }} import {{ imp.symbol }}
 {%- endfor %}
@@ -34,14 +35,16 @@ the user's intent:
 {%- endfor %}
 {%- endif %}
 
-{% if routing and routing.fallback %}If nothing matches, {{ routing.fallback }}.{% else %}If nothing matches and the request is unclear, ask the user a concise clarifying question and end your turn.{% endif %}
+{% if routing and routing.fallback %}If nothing matches, {{ routing.fallback }}.{% else %}If nothing matches and the request is unclear, call request_clarification with your question, then ask it in your own reply.{% endif %}
 {%- if routing and routing.clarify_when %}
-If {{ routing.clarify_when }}, do NOT call a capability — ask the user a concise clarifying question and end your turn.
+If {{ routing.clarify_when }}, call request_clarification instead of any capability tool — do not guess or call a capability with missing information.
 {%- endif %}
+Never call request_clarification in the same turn as a capability tool.
 
 Never expose tool names or internal steps to the user; speak naturally as one assistant.
 """,
     tools=[
+        request_clarification_tool,
 {%- for imp in child_imports %}
         AgentTool(agent={{ imp.symbol }}),
 {%- endfor %}

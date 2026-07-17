@@ -1807,6 +1807,11 @@
         {% endfor %}
       </div>
 
+      <label class="ui-chip" style="margin-top:6px">
+        <input type="checkbox" id="ui-show-agent-trace" {% if tree.ui_spec.show_agent_trace %}checked{% endif %} />
+        Show agent trace in generated UI
+      </label>
+
       <div style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap">
         <button onclick="saveUI(this)" class="ui-btn-secondary">Save edits</button>
         <button onclick="approveUI(this)" class="ui-btn-primary">Approve &amp; compile</button>
@@ -3326,6 +3331,7 @@ function _uiPayload() {
     inputs: _collectChecked('ui-inputs'),
     output_renderers: _collectChecked('ui-renderers'),
     user_facing_nodes: _collectChecked('ui-userfacing'),
+    show_agent_trace: document.getElementById('ui-show-agent-trace').checked,
   };
 }
 

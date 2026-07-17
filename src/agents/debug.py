@@ -404,9 +404,14 @@ class DebugAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _run_pytest(self, project_dir: Path, test_file: Path) -> tuple[int, str]:
-        """Run pytest on `test_file` inside project_dir. Returns (exit_code, combined_output)."""
+        """Run pytest on `test_file` inside project_dir. Returns (exit_code, combined_output).
+
+        No `-x`: runs the whole file so every failing test surfaces in one pass, letting
+        one debug iteration repair all currently-broken nodes concurrently instead of
+        discovering (and fixing) them one at a time across iterations.
+        """
         proc = await asyncio.create_subprocess_exec(
-            "uv", "run", "pytest", str(test_file.name), "-x", "-v",
+            "uv", "run", "pytest", str(test_file.name), "-v",
             "--tb=short", "--no-header",
             cwd=str(project_dir),
             stdout=asyncio.subprocess.PIPE,
@@ -424,7 +429,14 @@ class DebugAgent(BaseAgent):
     async def _patch_from_error(
         self, error_output: str, project_dir: Path, tree: SkillTree, test_file: Path | None = None
     ) -> bool:
-        """Identify the failing atomic node or test file and patch it. Returns True if patched."""
+        """Identify every failing atomic node (and any leftover test-level failures) in
+        `error_output` and repair them all concurrently in one pass. Returns True if
+        anything was changed.
+
+        Batching across ALL failures in a single pytest run (rather than patching just the
+        first) is what lets one debug iteration fix N independent bugs instead of N.
+        """
+        changed = False
 
         # ── Priority -1: memory adapter failure ──────────────────────────────
         # Memory adapters are template-generated (not SkillNodes); a failure in
@@ -445,47 +457,70 @@ class DebugAgent(BaseAgent):
                 # Fall through to normal repair paths.
 
         # ── Priority 0: deterministic sanitize of the test file ───────────────
-        # Catches known API misuses (Part.from_text etc.) without an LLM call.
+        # Catches known API misuses (Part.from_text etc.) without an LLM call. Does NOT
+        # return early — a real node fix below shouldn't be deferred to next iteration.
         if test_file is not None and test_file.exists():
             original = test_file.read_text()
             sanitized = _sanitize_test_code(original)
             if sanitized != original:
                 test_file.write_text(sanitized)
                 logger.info("[debug] Deterministic sanitize fixed test file.")
-                return True
+                changed = True
 
-        # ── Priority 1: atomic node repair ────────────────────────────────────
-        node = self._identify_failing_node(error_output, project_dir, tree)
-        if node is not None:
-            logger.info("[debug] Patching node '%s' …", node.name)
-            new_impl = await self._patch_agent.patch(node, error_output)
-            if not new_impl:
-                logger.warning("[debug] Patch agent returned nothing for '%s'.", node.name)
-                # Fall through to test repair below
+        # ── Priority 1: atomic node repair, batched across every failing test ─
+        # Group each failure chunk by the node it implicates, so a node hit by multiple
+        # failing tests gets one merged patch call instead of one per test.
+        grouped: dict[str, tuple[SkillNode, str]] = {}
+        leftover_chunks: list[str] = []
+        for chunk in _split_failures(error_output):
+            node = self._identify_failing_node(chunk, project_dir, tree)
+            if node is None:
+                leftover_chunks.append(chunk)
+                continue
+            if node.id in grouped:
+                prev_node, prev_err = grouped[node.id]
+                grouped[node.id] = (prev_node, prev_err + "\n" + chunk)
             else:
+                grouped[node.id] = (node, chunk)
+
+        if grouped:
+            logger.info(
+                "[debug] Patching %d node(s) concurrently: %s",
+                len(grouped), ", ".join(n.name for n, _ in grouped.values()),
+            )
+            patch_results = await asyncio.gather(
+                *(self._patch_agent.patch(node, err[-4000:]) for node, err in grouped.values())
+            )
+            atomics_dir = project_dir / "atomics"
+            for (node, _), new_impl in zip(grouped.values(), patch_results):
+                if not new_impl:
+                    logger.warning("[debug] Patch agent returned nothing for '%s'.", node.name)
+                    continue
                 node.implementation = new_impl
-                atomics_dir = project_dir / "atomics"
                 try:
                     self._compiler._compile_atomic(node, atomics_dir)  # type: ignore[attr-defined]
                     logger.info("[debug] Patched and recompiled '%s'.", node.name)
-                    return True
+                    changed = True
                 except ValueError as exc:
                     logger.error("[debug] Recompile after patch failed for '%s': %s", node.name, exc)
-                    # Fall through to test repair below
 
-        # ── Priority 2: LLM rewrite of the test file ──────────────────────────
-        if test_file is not None and test_file.exists():
-            logger.info("[debug] Attempting LLM test-file repair …")
+        # ── Priority 2: LLM rewrite of the test file for leftover failures ────
+        # Only the chunks that didn't map to a node — assertion/test-level mismatches.
+        if leftover_chunks and test_file is not None and test_file.exists():
+            logger.info(
+                "[debug] Attempting LLM test-file repair for %d unmatched failure(s) …",
+                len(leftover_chunks),
+            )
             new_test = await self._test_patch_agent.patch(
-                test_file.read_text(), error_output
+                test_file.read_text(), "\n".join(leftover_chunks)[-4000:]
             )
             if new_test:
                 new_test = _sanitize_test_code(new_test)
                 test_file.write_text(new_test)
                 logger.info("[debug] Rewrote test file after LLM repair.")
-                return True
+                changed = True
 
-        return False
+        return changed
 
     def _identify_failing_node(
         self, error_output: str, project_dir: Path, tree: SkillTree
@@ -530,6 +565,30 @@ class DebugAgent(BaseAgent):
             ),
             None,
         )
+
+
+# ------------------------------------------------------------------
+# Split a pytest run's output into one chunk per failing test
+# ------------------------------------------------------------------
+
+_FAILURE_HEADER_RE = re.compile(r"^_{10,}\s*(.+?)\s*_{10,}$", re.MULTILINE)
+
+
+def _split_failures(output: str) -> list[str]:
+    """Split a pytest FAILURES section into one chunk per failing test.
+
+    Splits on pytest's `___ test_name ___` failure headers so each chunk can be fed to
+    `_identify_failing_node` independently, letting a single pytest run surface every
+    broken node instead of just the first one `-x` would have stopped at. Falls back to
+    the whole output as a single chunk if no headers are found (e.g. a collection error).
+    """
+    matches = list(_FAILURE_HEADER_RE.finditer(output))
+    if not matches:
+        return [output]
+    return [
+        output[m.start(): matches[i + 1].start() if i + 1 < len(matches) else len(output)]
+        for i, m in enumerate(matches)
+    ]
 
 
 class _PatchAgent(BaseAgent):

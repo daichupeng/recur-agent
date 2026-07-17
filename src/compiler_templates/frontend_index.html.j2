@@ -84,6 +84,12 @@
       font-size: 13px; font-weight: 500;
     }
     .artifact-file:hover { background: var(--bg); }
+    .trace-disclosure { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; max-width: min(680px, 74%); }
+    .trace-disclosure summary { cursor: pointer; user-select: none; padding: 2px 4px; }
+    .trace-disclosure summary:hover { color: var(--text-secondary); }
+    .trace-list { margin-top: 4px; padding: 8px 10px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+    .trace-item { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; }
+    .trace-item.trace-text { color: var(--text-secondary); }
     .typing-indicator { display: flex; align-items: center; gap: 4px; padding: 13px 16px; }
     .typing-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); animation: bounce 1.2s ease-in-out infinite; }
     .typing-dot:nth-child(2){animation-delay:.2s} .typing-dot:nth-child(3){animation-delay:.4s}
@@ -165,6 +171,7 @@
 let MANIFEST = null;
 let sessionId = null;
 let busy = false;
+let currentTrace = [];   // per-turn buffer of {author, kind, name?, content?}
 const pendingAttachments = [];   // {name, mimeType, dataB64}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -283,6 +290,7 @@ async function sendMessage() {
   if ((!text && pendingAttachments.length === 0) || !sessionId || busy) return;
   busy = true; enable(false); setStatus('thinking', 'Thinking…');
   document.getElementById('empty-state').style.display = 'none';
+  currentTrace = [];
 
   // Build multimodal parts
   const parts = [];
@@ -326,6 +334,8 @@ async function sendMessage() {
     }
     typingRow.remove();
     if (Object.keys(agentBubbles).length === 0) appendAgentText('assistant', '(No response)');
+    if (currentTrace.length > 0) renderTraceDisclosure(currentTrace);
+    currentTrace = [];
   } catch (err) {
     typingRow.remove(); appendError(err.message);
   } finally {
@@ -355,7 +365,11 @@ function handleEvent(ev, agentBubbles, typingRow) {
   if (!parts.length) return;
 
   // 2) Text content — only from user-facing authors (hides intermediate agents).
-  if (!isUserFacing(author)) return;
+  if (!isUserFacing(author)) {
+    if (MANIFEST.show_agent_trace) bufferTrace(author, parts);
+    return;
+  }
+  bufferTrace(author, parts);
   const textPart = parts.map(p => p.text).filter(Boolean).join('');
   if (textPart) {
     typingRow.remove();
@@ -364,6 +378,53 @@ function handleEvent(ev, agentBubbles, typingRow) {
     setBubbleContent(agentBubbles[author].row, agentBubbles[author].text);
     scrollToBottom();
   }
+}
+
+// ── Internal-step trace buffering (collapsed disclosure, when enabled) ─────────
+function bufferTrace(author, parts) {
+  if (!MANIFEST.show_agent_trace) return;
+  for (const p of parts) {
+    if (p.functionCall) {
+      if (p.functionCall.name === 'request_clarification') continue;
+      currentTrace.push({ author, kind: 'call', name: p.functionCall.name });
+    } else if (p.functionResponse) {
+      currentTrace.push({ author, kind: 'result', name: p.functionResponse.name, content: p.functionResponse.response });
+    } else if (p.text) {
+      currentTrace.push({ author, kind: 'text', content: p.text });
+    }
+  }
+}
+
+function renderTraceDisclosure(trace) {
+  const details = document.createElement('details');
+  details.className = 'trace-disclosure';
+  const summary = document.createElement('summary');
+  summary.textContent = `▸ ${trace.length} steps`;
+  details.appendChild(summary);
+  const list = document.createElement('div');
+  list.className = 'trace-list';
+  for (const entry of trace) {
+    const item = document.createElement('div');
+    item.className = 'trace-item';
+    if (entry.kind === 'call') {
+      item.textContent = `${entry.author} → called ${entry.name}`;
+    } else if (entry.kind === 'result') {
+      item.textContent = `${entry.author} ← ${entry.name} returned ${JSON.stringify(entry.content)}`;
+    } else {
+      item.innerHTML = renderText(entry.content);
+      item.classList.add('trace-text');
+    }
+    list.appendChild(item);
+  }
+  details.appendChild(list);
+
+  const row = document.createElement('div'); row.className = 'msg-row agent';
+  const spacer = document.createElement('div'); spacer.style.width = '30px'; spacer.style.flexShrink = '0';
+  const col = document.createElement('div'); col.className = 'bubble-col';
+  col.appendChild(details);
+  row.appendChild(spacer); row.appendChild(col);
+  messages().appendChild(row);
+  scrollToBottom();
 }
 
 // ── Artifact fetch + render ─────────────────────────────────────────────────────

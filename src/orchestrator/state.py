@@ -214,6 +214,7 @@ class UISpec(BaseModel):
     example_prompts: list[str] = Field(default_factory=list)
     user_facing_nodes: list[str] = Field(default_factory=list)  # node NAMES marked user_facing
     accept_mime_types: list[str] = Field(default_factory=list)  # e.g. ["image/*", "application/pdf"]
+    show_agent_trace: bool = True  # collapsed-by-default trace of internal agent steps in the generated UI
 
 
 class MemoryBackend(str, Enum):
